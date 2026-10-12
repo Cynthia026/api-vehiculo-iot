@@ -2,6 +2,9 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from app.database import db_manager
 
+# Importamos nuestros nuevos routers
+from app.routers import vehiculos, comandos
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("\n=======================================================")
@@ -40,3 +43,11 @@ def health_db():
         "rds_connected": is_connected,
         "database": "vehiculo_iot"
     }
+
+# --- REGISTRO DE ROUTERS ---
+app.include_router(vehiculos.router)
+app.include_router(comandos.router)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
