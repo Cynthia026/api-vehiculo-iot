@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from app.database import db_manager
 
 # Importamos nuestros nuevos routers
-from app.routers import vehiculos, comandos
+from app.routers import vehiculos, comandos, telemetria, demos
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,6 +47,8 @@ def health_db():
 # --- REGISTRO DE ROUTERS ---
 app.include_router(vehiculos.router)
 app.include_router(comandos.router)
+app.include_router(telemetria.router)
+app.include_router(demos.router)
 
 if __name__ == "__main__":
     import uvicorn
