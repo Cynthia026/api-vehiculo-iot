@@ -1,14 +1,19 @@
 from pydantic import BaseModel, Field
+from typing import Optional
 from datetime import datetime
 
 class HistorialCreate(BaseModel):
     id_vehiculo: int
     id_comando: int
-    detalles: str = Field(default="", max_length=255)
+    origen: str = Field(..., max_length=30)
 
-class HistorialResponse(HistorialCreate):
+class HistorialResponse(BaseModel):
     id_historial: int
-    fecha_ejecucion: datetime
+    id_vehiculo: int
+    comando: Optional[str] = None
+    codigo: Optional[int] = None
+    fecha_hora: Optional[datetime] = None
+    origen: str
 
     class Config:
         from_attributes = True
