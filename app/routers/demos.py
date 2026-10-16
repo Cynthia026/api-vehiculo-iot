@@ -62,21 +62,36 @@ async def tarea_ejecutar_demo(id_demo: int, id_vehiculo: int):
     if not movimientos:
         return
     
+    # 1. Notificar inicio (Opcional, pero muy recomendado)
+    await ws_manager.broadcast_json({"tipo_evento": "inicio_demo", "vehiculo": id_vehiculo})
+    
     for mov in movimientos:
         duracion_segundos = mov.get('duracion_ms', 1000) / 1000.0
         pausa_segundos = mov.get('pausa_ms', 500) / 1000.0
+        id_cmd_actual = mov.get('id_comando')
         
+        # --- CORRECCIÓN: ACTUALIZAR ESTADO EN BD DURANTE EL PASO ---
+        estado_actual = EstadoVehiculoUpdate(
+            id_vehiculo=id_vehiculo,
+            id_comando=id_cmd_actual, # Ponemos el comando que se está ejecutando
+            conectado=True
+        )
+        telemetria_service.actualizar_estado(estado_actual) # Llama al SP de estado en RDS
+        # -----------------------------------------------------------
+
         payload = {
             "tipo_evento": "movimiento_demo",
             "vehiculo": id_vehiculo,
-            "comando_en_ejecucion": mov.get('id_comando'),
+            "comando_en_ejecucion": id_cmd_actual,
             "accion": "ejecutando_paso",
             "orden": mov.get('orden')
         }
+        
         await ws_manager.broadcast_json(payload)
         await asyncio.sleep(duracion_segundos)
         await asyncio.sleep(pausa_segundos)
 
+    # 2. Notificar Fin y restablecer estado a 0 (Detenido/Standby)
     estado_final = EstadoVehiculoUpdate(
         id_vehiculo=id_vehiculo,
         id_comando=0,
