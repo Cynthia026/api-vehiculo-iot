@@ -10,7 +10,7 @@ from app.websocket.manager import ws_manager
 router = APIRouter(prefix="/api/demos", tags=["Secuencias DEMO"])
 
 # --- DICCIONARIO GLOBAL DE TAREAS EN CURSO ---
-# Guarda las tareas activas: { id_vehiculo: Task_De_Asyncio }
+# Guarda las tareas activas para evitar simultaneidad y permitir cancelación
 active_demo_tasks: Dict[int, asyncio.Task] = {}
 
 @router.websocket("/ws/{id_vehiculo}")
@@ -64,6 +64,7 @@ def eliminar_movimiento_demo(id_demo_movimiento: int):
     return None
 
 async def tarea_ejecutar_demo(id_demo: int, id_vehiculo: int):
+    """Tarea asíncrona de fondo que ejecuta la secuencia de movimientos."""
     try:
         movimientos = demo_service.obtener_movimientos(id_demo)
         if not movimientos:
@@ -76,6 +77,7 @@ async def tarea_ejecutar_demo(id_demo: int, id_vehiculo: int):
             pausa_segundos = mov.get('pausa_ms', 500) / 1000.0
             id_cmd_actual = mov.get('id_comando')
             
+            # Actualizamos la BD en cada paso
             estado_actual = EstadoVehiculoUpdate(
                 id_vehiculo=id_vehiculo,
                 id_comando=id_cmd_actual,
@@ -92,40 +94,36 @@ async def tarea_ejecutar_demo(id_demo: int, id_vehiculo: int):
             }
             
             await ws_manager.broadcast_json(payload)
-            # El ciclo duerme, aquí es donde asyncio inyecta la CancelledError si apretamos el botón de Stop
+            # El ciclo duerme, permitiendo que la tarea sea cancelada
             await asyncio.sleep(duracion_segundos)
             await asyncio.sleep(pausa_segundos)
 
-        # Si termina normal, notificamos fin normal y limpiamos la tarea activa
+        # Si termina normal, notificamos fin y restauramos BD
         estado_final = EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=0, conectado=True)
         telemetria_service.actualizar_estado(estado_final)
         await ws_manager.broadcast_json({"tipo_evento": "fin_demo", "vehiculo": id_vehiculo})
 
     except asyncio.CancelledError:
-        # --- LÓGICA DE CANCELACIÓN DE EMERGENCIA ---
-        print(f"[DEMO] Tarea cancelada para el vehiculo {id_vehiculo}")
-        estado_cancelado = EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=0, conectado=True)
-        telemetria_service.actualizar_estado(estado_cancelado)
-        await ws_manager.broadcast_json({"tipo_evento": "cancelacion_demo", "vehiculo": id_vehiculo})
-        # Levantamos el error de nuevo para que Asyncio sepa que sí la matamos correctamente
+        # La tarea muere en silencio, el endpoint de cancelación se encarga del aviso
         raise
 
     finally:
-        # Siempre quitamos la tarea del diccionario cuando termina (sea normal o cancelada)
+        # Limpieza de seguridad: quitar la tarea del diccionario al terminar
         if id_vehiculo in active_demo_tasks:
             del active_demo_tasks[id_vehiculo]
 
 
 @router.post("/{id_demo}/ejecutar")
 async def iniciar_ejecucion_demo(id_demo: int, id_vehiculo: int):
-    # 1. EVITAR SIMULTANEIDAD: Si ya hay una tarea viva para este vehículo, lanzamos error
+    """Punto 9 de Rúbrica: Inicia la demo y bloquea ejecuciones simultáneas."""
+    # 1. EVITAR SIMULTANEIDAD
     if id_vehiculo in active_demo_tasks:
         raise HTTPException(
             status_code=400, 
             detail=f"El vehículo {id_vehiculo} ya está ejecutando una DEMO. Cancele la actual o espere."
         )
 
-    # 2. INICIAR Y GUARDAR TAREA: Usamos create_task para tener control total de la vida del proceso
+    # 2. INICIAR Y GUARDAR TAREA
     tarea = asyncio.create_task(tarea_ejecutar_demo(id_demo, id_vehiculo))
     active_demo_tasks[id_vehiculo] = tarea
 
@@ -138,8 +136,19 @@ async def cancelar_ejecucion_demo(id_vehiculo: int):
     if id_vehiculo not in active_demo_tasks:
         return {"mensaje": "No hay ninguna DEMO en curso para este vehículo."}
     
-    # Extraer la tarea del diccionario y cancelarla "a la mala"
+    # 1. Matamos la tarea
     tarea_activa = active_demo_tasks[id_vehiculo]
     tarea_activa.cancel()
     
+    # 2. Restauramos la BD para que quede en Standby (comando 0)
+    estado_cancelado = EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=0, conectado=True)
+    telemetria_service.actualizar_estado(estado_cancelado)
+    
+    # 3. Avisamos por WebSocket de manera garantizada
+    await ws_manager.broadcast_json({"tipo_evento": "cancelacion_demo", "vehiculo": id_vehiculo})
+    
+    # 4. Limpiamos el diccionario
+    if id_vehiculo in active_demo_tasks:
+        del active_demo_tasks[id_vehiculo]
+        
     return {"mensaje": f"Se ha enviado la señal de detención al vehículo {id_vehiculo}."}
