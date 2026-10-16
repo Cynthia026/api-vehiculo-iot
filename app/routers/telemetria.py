@@ -19,7 +19,7 @@ def obtener_estado_vehiculo(id_vehiculo: int):
 @router.get("/historial/{id_vehiculo}", response_model=List[HistorialResponse])
 def obtener_historial(id_vehiculo: int):
     # Obtienes la lista completa del servicio
-    historial_completo = telemetria_service.obtener_historial(id_vehiculo)
+    historial_completo = historial_service.obtener_historial(id_vehiculo)
     
     # Validación de seguridad: Si viene vacío o nulo, devolvemos una lista vacía
     if not historial_completo:
