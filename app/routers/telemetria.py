@@ -21,7 +21,11 @@ def obtener_historial(id_vehiculo: int):
     # Obtienes la lista completa del servicio
     historial_completo = telemetria_service.obtener_historial(id_vehiculo)
     
-    # Devuelves solo los primeros 10 elementos
+    # Validación de seguridad: Si viene vacío o nulo, devolvemos una lista vacía
+    if not historial_completo:
+        return []
+        
+    # Si sí hay datos, devolvemos solo los primeros 10 elementos
     return historial_completo[:10]
 
 @router.post("/movimiento", response_model=EstadoVehiculoResponse)
