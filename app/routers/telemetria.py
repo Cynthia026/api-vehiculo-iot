@@ -17,8 +17,12 @@ def obtener_estado_vehiculo(id_vehiculo: int):
     return estado
 
 @router.get("/historial/{id_vehiculo}", response_model=List[HistorialResponse])
-def obtener_historial_vehiculo(id_vehiculo: int):
-    return historial_service.obtener_historial(id_vehiculo)
+def obtener_historial(id_vehiculo: int):
+    # Obtienes la lista completa del servicio
+    historial_completo = telemetria_service.obtener_historial(id_vehiculo)
+    
+    # Devuelves solo los primeros 10 elementos
+    return historial_completo[:10]
 
 @router.post("/movimiento", response_model=EstadoVehiculoResponse)
 async def ejecutar_movimiento_individual(
