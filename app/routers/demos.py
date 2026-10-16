@@ -1,6 +1,6 @@
 import asyncio
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks, status
-from typing import List
+from typing import List, Dict
 from app.schemas.demo import DemoCreate, DemoUpdate, DemoResponse, MovimientoDemoCreate, MovimientoDemoUpdate, MovimientoDemoResponse
 from app.services.demo_service import demo_service
 from app.services.telemetria_service import telemetria_service
@@ -8,6 +8,10 @@ from app.schemas.estado import EstadoVehiculoUpdate
 from app.websocket.manager import ws_manager
 
 router = APIRouter(prefix="/api/demos", tags=["Secuencias DEMO"])
+
+# --- DICCIONARIO GLOBAL DE TAREAS EN CURSO ---
+# Guarda las tareas activas: { id_vehiculo: Task_De_Asyncio }
+active_demo_tasks: Dict[int, asyncio.Task] = {}
 
 @router.websocket("/ws/{id_vehiculo}")
 async def websocket_endpoint(websocket: WebSocket, id_vehiculo: int):
@@ -60,49 +64,82 @@ def eliminar_movimiento_demo(id_demo_movimiento: int):
     return None
 
 async def tarea_ejecutar_demo(id_demo: int, id_vehiculo: int):
-    movimientos = demo_service.obtener_movimientos(id_demo)
-    if not movimientos:
-        return
-    
-    # 1. Notificar inicio (Opcional, pero muy recomendado)
-    await ws_manager.broadcast_json({"tipo_evento": "inicio_demo", "vehiculo": id_vehiculo})
-    
-    for mov in movimientos:
-        duracion_segundos = mov.get('duracion_ms', 1000) / 1000.0
-        pausa_segundos = mov.get('pausa_ms', 500) / 1000.0
-        id_cmd_actual = mov.get('id_comando')
+    try:
+        movimientos = demo_service.obtener_movimientos(id_demo)
+        if not movimientos:
+            return
         
-        # --- CORRECCIÓN: ACTUALIZAR ESTADO EN BD DURANTE EL PASO ---
-        estado_actual = EstadoVehiculoUpdate(
-            id_vehiculo=id_vehiculo,
-            id_comando=id_cmd_actual, # Ponemos el comando que se está ejecutando
-            conectado=True
-        )
-        telemetria_service.actualizar_estado(estado_actual) # Llama al SP de estado en RDS
-        # -----------------------------------------------------------
-
-        payload = {
-            "tipo_evento": "movimiento_demo",
-            "vehiculo": id_vehiculo,
-            "comando_en_ejecucion": id_cmd_actual,
-            "accion": "ejecutando_paso",
-            "orden": mov.get('orden')
-        }
+        await ws_manager.broadcast_json({"tipo_evento": "inicio_demo", "vehiculo": id_vehiculo})
         
-        await ws_manager.broadcast_json(payload)
-        await asyncio.sleep(duracion_segundos)
-        await asyncio.sleep(pausa_segundos)
+        for mov in movimientos:
+            duracion_segundos = mov.get('duracion_ms', 1000) / 1000.0
+            pausa_segundos = mov.get('pausa_ms', 500) / 1000.0
+            id_cmd_actual = mov.get('id_comando')
+            
+            estado_actual = EstadoVehiculoUpdate(
+                id_vehiculo=id_vehiculo,
+                id_comando=id_cmd_actual,
+                conectado=True
+            )
+            telemetria_service.actualizar_estado(estado_actual) 
 
-    # 2. Notificar Fin y restablecer estado a 0 (Detenido/Standby)
-    estado_final = EstadoVehiculoUpdate(
-        id_vehiculo=id_vehiculo,
-        id_comando=0,
-        conectado=True
-    )
-    telemetria_service.actualizar_estado(estado_final)
-    await ws_manager.broadcast_json({"tipo_evento": "fin_demo", "vehiculo": id_vehiculo})
+            payload = {
+                "tipo_evento": "movimiento_demo",
+                "vehiculo": id_vehiculo,
+                "comando_en_ejecucion": id_cmd_actual,
+                "accion": "ejecutando_paso",
+                "orden": mov.get('orden')
+            }
+            
+            await ws_manager.broadcast_json(payload)
+            # El ciclo duerme, aquí es donde asyncio inyecta la CancelledError si apretamos el botón de Stop
+            await asyncio.sleep(duracion_segundos)
+            await asyncio.sleep(pausa_segundos)
+
+        # Si termina normal, notificamos fin normal y limpiamos la tarea activa
+        estado_final = EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=0, conectado=True)
+        telemetria_service.actualizar_estado(estado_final)
+        await ws_manager.broadcast_json({"tipo_evento": "fin_demo", "vehiculo": id_vehiculo})
+
+    except asyncio.CancelledError:
+        # --- LÓGICA DE CANCELACIÓN DE EMERGENCIA ---
+        print(f"[DEMO] Tarea cancelada para el vehiculo {id_vehiculo}")
+        estado_cancelado = EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=0, conectado=True)
+        telemetria_service.actualizar_estado(estado_cancelado)
+        await ws_manager.broadcast_json({"tipo_evento": "cancelacion_demo", "vehiculo": id_vehiculo})
+        # Levantamos el error de nuevo para que Asyncio sepa que sí la matamos correctamente
+        raise
+
+    finally:
+        # Siempre quitamos la tarea del diccionario cuando termina (sea normal o cancelada)
+        if id_vehiculo in active_demo_tasks:
+            del active_demo_tasks[id_vehiculo]
+
 
 @router.post("/{id_demo}/ejecutar")
-async def iniciar_ejecucion_demo(id_demo: int, id_vehiculo: int, background_tasks: BackgroundTasks):
-    background_tasks.add_task(tarea_ejecutar_demo, id_demo, id_vehiculo)
+async def iniciar_ejecucion_demo(id_demo: int, id_vehiculo: int):
+    # 1. EVITAR SIMULTANEIDAD: Si ya hay una tarea viva para este vehículo, lanzamos error
+    if id_vehiculo in active_demo_tasks:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"El vehículo {id_vehiculo} ya está ejecutando una DEMO. Cancele la actual o espere."
+        )
+
+    # 2. INICIAR Y GUARDAR TAREA: Usamos create_task para tener control total de la vida del proceso
+    tarea = asyncio.create_task(tarea_ejecutar_demo(id_demo, id_vehiculo))
+    active_demo_tasks[id_vehiculo] = tarea
+
     return {"mensaje": "Secuencia DEMO iniciada", "vehiculo": id_vehiculo, "demo": id_demo}
+
+
+@router.post("/vehiculo/{id_vehiculo}/cancelar")
+async def cancelar_ejecucion_demo(id_vehiculo: int):
+    """Punto 9 de Rúbrica: Detiene la ejecución si hay una DEMO en curso."""
+    if id_vehiculo not in active_demo_tasks:
+        return {"mensaje": "No hay ninguna DEMO en curso para este vehículo."}
+    
+    # Extraer la tarea del diccionario y cancelarla "a la mala"
+    tarea_activa = active_demo_tasks[id_vehiculo]
+    tarea_activa.cancel()
+    
+    return {"mensaje": f"Se ha enviado la señal de detención al vehículo {id_vehiculo}."}
