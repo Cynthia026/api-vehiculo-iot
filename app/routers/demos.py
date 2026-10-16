@@ -9,14 +9,16 @@ from app.websocket.manager import ws_manager
 
 router = APIRouter(prefix="/api/demos", tags=["Secuencias DEMO"])
 
-@router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await ws_manager.connect(websocket)
+@router.websocket("/ws/{id_vehiculo}")
+async def websocket_endpoint(websocket: WebSocket, id_vehiculo: int):
+    # Le pasamos el ID al manager
+    await ws_manager.connect(websocket, id_vehiculo)
     try:
         while True:
             data = await websocket.receive_text()
     except WebSocketDisconnect:
-        ws_manager.disconnect(websocket)
+        # Lo desconectamos de ese ID
+        ws_manager.disconnect(websocket, id_vehiculo)
 
 @router.get("/vehiculo/{id_vehiculo}", response_model=List[DemoResponse])
 def listar_demos_vehiculo(id_vehiculo: int):
