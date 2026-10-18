@@ -19,8 +19,8 @@ async def lifespan(app: FastAPI):
     print("\n--- Servidor detenido. ---")
 
 app = FastAPI(
-    title="API Vehículo IoT - Práctica 2.5",
-    description="API desarrollada con FastAPI, POO, WebSocket y Amazon RDS",
+    title="🚜 API Control y Telemetría - Excavadora IoT",
+    description="Documentación oficial de los endpoints REST y WebSockets para el control remoto y monitoreo del vehículo.",
     version="1.0.0",
     lifespan=lifespan,
     docs_url=None  # Apagamos la ruta por defecto para poder inyectar colores y pie de página
@@ -29,10 +29,11 @@ app = FastAPI(
 # === RUTA PERSONALIZADA PARA CAMBIAR COLORES Y AGREGAR PIE DE PÁGINA ===
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui_html():
-    # 1. Generamos el HTML original de Swagger
+    # 1. Generamos el HTML original de Swagger inyectando el CSS de MODO OSCURO
     html_response = get_swagger_ui_html(
         openapi_url=app.openapi_url,
         title=app.title + " - Swagger UI",
+        swagger_css_url="https://cdn.jsdelivr.net/gh/Itz-fork/Fastapi-Swagger-UI-Dark/assets/swagger_ui_dark.min.css",
         swagger_ui_parameters={
             "defaultModelsExpandDepth": -1,
             "docExpansion": "list",
@@ -42,32 +43,34 @@ async def custom_swagger_ui_html():
     )
     
     # 2. Creamos nuestros colores personalizados (CSS) actualizados
+    # Nota: Se agregó !important para que el modo oscuro no borre tus colores.
+    # El footer se oscureció para que combine con el resto de la página.
     custom_css_and_footer = """
     <style>
         /* GET - Azul Claro (Cyan/Sky Blue) */
-        .swagger-ui .opblock.opblock-get { background-color: rgba(0, 168, 255, 0.08); border-color: #00a8ff; }
-        .swagger-ui .opblock.opblock-get .opblock-summary-method { background: #00a8ff; color: #fff; }
+        .swagger-ui .opblock.opblock-get { background-color: rgba(0, 168, 255, 0.08) !important; border-color: #00a8ff !important; }
+        .swagger-ui .opblock.opblock-get .opblock-summary-method { background: #00a8ff !important; color: #fff !important; }
         
         /* POST - Verde Esmeralda */
-        .swagger-ui .opblock.opblock-post { background-color: rgba(0, 184, 148, 0.08); border-color: #00b894; }
-        .swagger-ui .opblock.opblock-post .opblock-summary-method { background: #00b894; color: #fff; }
+        .swagger-ui .opblock.opblock-post { background-color: rgba(0, 184, 148, 0.08) !important; border-color: #00b894 !important; }
+        .swagger-ui .opblock.opblock-post .opblock-summary-method { background: #00b894 !important; color: #fff !important; }
         
         /* PUT - Naranja Puro */
-        .swagger-ui .opblock.opblock-put { background-color: rgba(255, 140, 0, 0.08); border-color: #ff8c00; }
-        .swagger-ui .opblock.opblock-put .opblock-summary-method { background: #ff8c00; color: #fff; }
+        .swagger-ui .opblock.opblock-put { background-color: rgba(255, 140, 0, 0.08) !important; border-color: #ff8c00 !important; }
+        .swagger-ui .opblock.opblock-put .opblock-summary-method { background: #ff8c00 !important; color: #fff !important; }
         
         /* DELETE - Rosa Vibrante */
-        .swagger-ui .opblock.opblock-delete { background-color: rgba(232, 67, 147, 0.08); border-color: #e84393; }
-        .swagger-ui .opblock.opblock-delete .opblock-summary-method { background: #e84393; color: #fff; }
+        .swagger-ui .opblock.opblock-delete { background-color: rgba(232, 67, 147, 0.08) !important; border-color: #e84393 !important; }
+        .swagger-ui .opblock.opblock-delete .opblock-summary-method { background: #e84393 !important; color: #fff !important; }
 
-        /* Estilos del Footer */
+        /* Estilos del Footer adaptados a Modo Oscuro */
         #custom-footer {
             text-align: center;
             padding: 20px;
             margin-top: 40px;
-            background-color: #f8f9fa;
-            border-top: 1px solid #e9ecef;
-            color: #495057;
+            background-color: #1e1e1e;
+            border-top: 1px solid #333;
+            color: #d4d4d4;
             font-family: sans-serif;
             font-size: 14px;
             width: 100%;
