@@ -23,13 +23,12 @@ app = FastAPI(
     description="Documentación oficial de los endpoints REST y WebSockets para el control remoto y monitoreo del vehículo.",
     version="1.0.0",
     lifespan=lifespan,
-    docs_url=None  # Apagamos la ruta por defecto para poder inyectar colores y pie de página
+    docs_url=None  
 )
 
 # === RUTA PERSONALIZADA PARA CAMBIAR COLORES Y AGREGAR PIE DE PÁGINA ===
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui_html():
-    # 1. Generamos el HTML original de Swagger inyectando el CSS de MODO OSCURO
     html_response = get_swagger_ui_html(
         openapi_url=app.openapi_url,
         title=app.title + " - Swagger UI",
@@ -42,9 +41,6 @@ async def custom_swagger_ui_html():
         }
     )
     
-    # 2. Creamos nuestros colores personalizados (CSS) actualizados
-    # Nota: Se agregó !important para que el modo oscuro no borre tus colores.
-    # El footer se oscureció para que combine con el resto de la página.
     custom_css_and_footer = """
     <style>
         /* GET - Azul Claro (Cyan/Sky Blue) */
@@ -62,6 +58,26 @@ async def custom_swagger_ui_html():
         /* DELETE - Rosa Vibrante */
         .swagger-ui .opblock.opblock-delete { background-color: rgba(232, 67, 147, 0.08) !important; border-color: #e84393 !important; }
         .swagger-ui .opblock.opblock-delete .opblock-summary-method { background: #e84393 !important; color: #fff !important; }
+
+        /* --- CORRECCIÓN: Arreglo para que las rutas no salgan en vertical --- */
+        .swagger-ui .opblock .opblock-summary {
+            display: flex !important;
+            flex-direction: row !important;
+            align-items: center !important;
+        }
+        .swagger-ui .opblock .opblock-summary-path {
+            white-space: nowrap !important;  /* <- Esto fuerza a que el texto se mantenga en una línea */
+            word-break: normal !important;
+            flex: 0 1 auto !important;
+            padding-left: 10px !important;
+            font-size: 15px !important;
+            font-family: monospace !important;
+        }
+        .swagger-ui .opblock .opblock-summary-description {
+            padding-left: 15px !important;
+            flex: 1 1 auto !important;
+            text-align: left !important;
+        }
 
         /* Estilos del Footer adaptados a Modo Oscuro */
         #custom-footer {
@@ -82,21 +98,14 @@ async def custom_swagger_ui_html():
     </div>
     """
     
-    # 3. Inyectamos los colores CSS antes de cerrar <head> y el pie de página antes de cerrar <body>
     original_html = html_response.body.decode("utf-8")
-    
-    # Extraemos el bloque CSS de la variable anterior
     css_part = custom_css_and_footer.split('<div id="custom-footer">')[0]
     footer_part = '<div id="custom-footer">' + custom_css_and_footer.split('<div id="custom-footer">')[1]
 
-    # Inyectamos CSS en Head
     html_with_css = original_html.replace("</head>", css_part + "</head>")
-    
-    # Inyectamos Footer en Body
     final_html = html_with_css.replace("</body>", footer_part + "</body>")
     
     return HTMLResponse(final_html)
-
 
 @app.get("/health/db", tags=["Health Check"])
 def health_db():
