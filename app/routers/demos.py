@@ -100,7 +100,7 @@ async def tarea_ejecutar_demo(id_demo: int, id_vehiculo: int):
             await asyncio.sleep(pausa_segundos)
 
         # Si termina normal, notificamos fin y restauramos BD
-        estado_final = EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=0, conectado=True)
+        estado_final = EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=9, conectado=True)
         telemetria_service.actualizar_estado(estado_final)
         await ws_manager.broadcast_json({"tipo_evento": "fin_demo", "vehiculo": id_vehiculo})
 
@@ -143,7 +143,7 @@ async def cancelar_ejecucion_demo(id_vehiculo: int):
         tarea_activa.cancel()
         
         # 2. Restauramos la BD para que quede en Standby (comando 0)
-        estado_cancelado = EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=0, conectado=True)
+        estado_cancelado = EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=9, conectado=True)
         telemetria_service.actualizar_estado(estado_cancelado)
         
         # 3. Avisamos por WebSocket de manera garantizada
