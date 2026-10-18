@@ -18,8 +18,9 @@ async def lifespan(app: FastAPI):
     yield
     print("\n--- Servidor detenido. ---")
 
+# QUITAMOS EL CARRITO DE AQUÍ PARA INYECTARLO CON CSS
 app = FastAPI(
-    title="🚜 API Control y Telemetría - Excavadora IoT",
+    title="API Control y Telemetría - Excavadora IoT",
     description="Documentación oficial de los endpoints REST y WebSockets para el control remoto y monitoreo del vehículo.",
     version="1.0.0",
     lifespan=lifespan,
@@ -41,14 +42,14 @@ async def custom_swagger_ui_html():
     
     custom_css_and_footer = """
     <style>
-        /* --- FONDO ROSA MÁS FUERTE --- */
+        /* --- FONDO ROSA MUY SUTIL Y ELEGANTE --- */
         body, .swagger-ui {
-            background-color: #ffe0e9 !important; /* Rosa más notorio y estético */
+            background-color: #fcf0f4 !important; /* Blanco rosado pastel muy suave */
         }
         .swagger-ui .scheme-container {
-            background-color: #ffd1dd !important; /* Cinta decorativa en rosa un poco más fuerte */
+            background-color: #fae6ec !important; /* Un rosa levamente más notorio para la franja */
             box-shadow: none !important;
-            border-bottom: 2px solid #ffb3c6 !important;
+            border-bottom: 2px solid #f8d0db !important;
         }
 
         /* --- CENTRAR EL TÍTULO Y LA DESCRIPCIÓN --- */
@@ -59,6 +60,7 @@ async def custom_swagger_ui_html():
             text-align: center !important;
             margin-top: 40px !important;
         }
+        
         .swagger-ui .info .title {
             display: flex !important;
             justify-content: center !important;
@@ -66,6 +68,17 @@ async def custom_swagger_ui_html():
             width: 100% !important;
             flex-wrap: wrap !important;
         }
+        
+        /* MAGIA CSS: Inyectamos el carrito y lo hacemos rosa rotando sus colores */
+        .swagger-ui .info .title::before {
+            content: "🚜";
+            display: inline-block;
+            margin-right: 12px;
+            font-size: 1.1em;
+            /* Filtro que convierte el verde del tractor en rosa/magenta */
+            filter: hue-rotate(200deg) saturate(3) brightness(1.1);
+        }
+
         .swagger-ui .info .description {
             text-align: center !important;
             margin: 0 auto !important;
@@ -77,23 +90,20 @@ async def custom_swagger_ui_html():
             width: 100% !important;
         }
 
-        /* GET - Azul Claro */
+        /* COLORES DE LOS MÉTODOS HTTP */
         .swagger-ui .opblock.opblock-get { background-color: rgba(0, 168, 255, 0.08) !important; border-color: #00a8ff !important; }
         .swagger-ui .opblock.opblock-get .opblock-summary-method { background: #00a8ff !important; color: #fff !important; }
         
-        /* POST - Verde Esmeralda */
         .swagger-ui .opblock.opblock-post { background-color: rgba(0, 184, 148, 0.08) !important; border-color: #00b894 !important; }
         .swagger-ui .opblock.opblock-post .opblock-summary-method { background: #00b894 !important; color: #fff !important; }
         
-        /* PUT - Naranja Puro */
         .swagger-ui .opblock.opblock-put { background-color: rgba(255, 140, 0, 0.08) !important; border-color: #ff8c00 !important; }
         .swagger-ui .opblock.opblock-put .opblock-summary-method { background: #ff8c00 !important; color: #fff !important; }
         
-        /* DELETE - Rosa Vibrante */
         .swagger-ui .opblock.opblock-delete { background-color: rgba(232, 67, 147, 0.08) !important; border-color: #e84393 !important; }
         .swagger-ui .opblock.opblock-delete .opblock-summary-method { background: #e84393 !important; color: #fff !important; }
 
-        /* --- Rutas horizontales --- */
+        /* --- RUTAS HORIZONTALES --- */
         .swagger-ui .opblock-summary {
             display: flex !important;
             align-items: center !important;
@@ -103,39 +113,40 @@ async def custom_swagger_ui_html():
         .swagger-ui .opblock-summary-path a {
             white-space: nowrap !important;
             word-break: keep-all !important;
-            overflow-wrap: normal !important;
             font-size: 15px !important;
             display: inline-block !important; 
             padding-right: 15px !important;
             color: #333 !important;
         }
-        .swagger-ui .opblock-summary-description {
-            white-space: nowrap !important;
-            overflow: hidden !important;
-            text-overflow: ellipsis !important;
-            color: #555 !important;
-        }
 
-        /* --- Títulos Principales --- */
+        /* --- TÍTULOS PRINCIPALES Y ALINEACIÓN --- */
         .swagger-ui .opblock-tag {
-            color: #d81b60 !important; /* Rosa oscuro intenso/Magenta */
+            color: #d81b60 !important; 
             font-size: 22px !important;
-            border-bottom: 2px solid rgba(216, 27, 96, 0.3) !important;
+            border-bottom: 2px solid rgba(216, 27, 96, 0.2) !important;
             font-weight: bold !important;
             display: flex !important;
             align-items: center !important;
+            justify-content: space-between !important; /* Separa el texto de la flechita */
         }
+        
+        /* Contenedor extra para agrupar el Título y el Contador */
+        .swagger-ui .opblock-tag > div:first-child {
+            display: flex !important;
+            align-items: center !important;
+        }
+
         .swagger-ui .opblock-tag svg {
             fill: #d81b60 !important; 
         }
 
-        /* Estilos del Footer */
+        /* --- FOOTER --- */
         #custom-footer {
             text-align: center;
             padding: 20px;
             margin-top: 40px;
-            background-color: #ffc4d4; 
-            border-top: 1px solid #ffb3c6;
+            background-color: #fae6ec; 
+            border-top: 1px solid #f8d0db;
             color: #495057;
             font-family: sans-serif;
             font-size: 14px;
@@ -147,29 +158,21 @@ async def custom_swagger_ui_html():
         Desarrollado por: <strong>Cynthia Martínez García</strong>
     </div>
 
-    <!-- Script de Magia: Pinta el carrito de rosa y asegura los contadores -->
+    <!-- SCRIPT CORREGIDO PARA LOS CONTADORES -->
     <script>
-        // Usamos setInterval para que escanee la página cada segundo y garantice los cambios
         setInterval(() => {
-            // 1. PINTAR EL CARRITO DE ROSA (Filtro CSS)
-            const titleSpan = document.querySelector('.swagger-ui .info .title span');
-            if (titleSpan && !titleSpan.hasAttribute('data-pink')) {
-                // Reemplazamos el emoji por uno envuelto en un span con filtro que convierte verde en rosa
-                titleSpan.innerHTML = titleSpan.innerHTML.replace('🚜', '<span style="filter: hue-rotate(220deg) saturate(2) brightness(1.2); display: inline-block;">🚜</span>');
-                titleSpan.setAttribute('data-pink', 'true');
-            }
-
-            // 2. AGREGAR CONTADORES DE ENDPOINTS GARANTIZADOS
             const sections = document.querySelectorAll('.swagger-ui .opblock-tag-section');
+            
             sections.forEach(section => {
-                const titleEl = section.querySelector('h4.opblock-tag');
+                // Quitamos el h4 para que no falle sin importar la versión de Swagger
+                const titleEl = section.querySelector('.opblock-tag');
                 const count = section.querySelectorAll('.opblock').length;
                 
-                // Si la sección tiene endpoints y aún no le ponemos la etiqueta
                 if (titleEl && count > 0 && !titleEl.hasAttribute('data-counted')) {
+                    // Creamos el badge
                     const badge = document.createElement('span');
-                    badge.style.backgroundColor = '#d81b60'; // Fondo rosa magenta
-                    badge.style.color = '#ffffff'; // Texto blanco
+                    badge.style.backgroundColor = '#d81b60';
+                    badge.style.color = '#ffffff';
                     badge.style.borderRadius = '12px';
                     badge.style.padding = '4px 12px';
                     badge.style.marginLeft = '15px';
@@ -177,12 +180,11 @@ async def custom_swagger_ui_html():
                     badge.style.fontWeight = 'bold';
                     badge.innerText = count + (count === 1 ? ' Endpoint' : ' Endpoints');
                     
-                    // Insertar la etiqueta justo antes de la flechita de desplegar
-                    const arrowBtn = titleEl.querySelector('button');
-                    if (arrowBtn) {
-                        titleEl.insertBefore(badge, arrowBtn);
-                    } else {
-                        titleEl.appendChild(badge);
+                    // Buscamos el enlace (a) que contiene el texto "Vehículos", "Comandos", etc.
+                    const linkEl = titleEl.querySelector('a');
+                    if (linkEl) {
+                        // Insertamos el contador justo al lado del texto
+                        linkEl.parentNode.insertBefore(badge, linkEl.nextSibling);
                     }
                     
                     titleEl.setAttribute('data-counted', 'true');
