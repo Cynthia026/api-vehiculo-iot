@@ -63,6 +63,7 @@ def eliminar_movimiento_demo(id_demo_movimiento: int):
     demo_service.eliminar_movimiento(id_demo_movimiento)
     return None
 
+
 async def tarea_ejecutar_demo(id_demo: int, id_vehiculo: int):
     """Tarea asíncrona de fondo que ejecuta la secuencia de movimientos."""
     try:
@@ -104,11 +105,12 @@ async def tarea_ejecutar_demo(id_demo: int, id_vehiculo: int):
         await ws_manager.broadcast_json({"tipo_evento": "fin_demo", "vehiculo": id_vehiculo})
 
     except asyncio.CancelledError:
-        # La tarea muere en silencio, el endpoint de cancelación se encarga del aviso
-        raise
+        # CORRECCIÓN CRÍTICA: En lugar de usar "raise", pasamos en silencio.
+        # Esto permite que la tarea muera en paz sin generar conflictos ni errores 500.
+        pass
 
     finally:
-        # Limpieza de seguridad: quitar la tarea del diccionario al terminar
+        # Limpieza de seguridad: quitar la tarea del diccionario al terminar (si aún existe)
         if id_vehiculo in active_demo_tasks:
             del active_demo_tasks[id_vehiculo]
 
@@ -116,14 +118,12 @@ async def tarea_ejecutar_demo(id_demo: int, id_vehiculo: int):
 @router.post("/{id_demo}/ejecutar")
 async def iniciar_ejecucion_demo(id_demo: int, id_vehiculo: int):
     """Punto 9 de Rúbrica: Inicia la demo y bloquea ejecuciones simultáneas."""
-    # 1. EVITAR SIMULTANEIDAD
     if id_vehiculo in active_demo_tasks:
         raise HTTPException(
             status_code=400, 
             detail=f"El vehículo {id_vehiculo} ya está ejecutando una DEMO. Cancele la actual o espere."
         )
 
-    # 2. INICIAR Y GUARDAR TAREA
     tarea = asyncio.create_task(tarea_ejecutar_demo(id_demo, id_vehiculo))
     active_demo_tasks[id_vehiculo] = tarea
 
@@ -133,22 +133,25 @@ async def iniciar_ejecucion_demo(id_demo: int, id_vehiculo: int):
 @router.post("/vehiculo/{id_vehiculo}/cancelar")
 async def cancelar_ejecucion_demo(id_vehiculo: int):
     """Punto 9 de Rúbrica: Detiene la ejecución si hay una DEMO en curso."""
-    if id_vehiculo not in active_demo_tasks:
-        return {"mensaje": "No hay ninguna DEMO en curso para este vehículo."}
-    
-    # 1. Matamos la tarea
-    tarea_activa = active_demo_tasks[id_vehiculo]
-    tarea_activa.cancel()
-    
-    # 2. Restauramos la BD para que quede en Standby (comando 0)
-    estado_cancelado = EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=0, conectado=True)
-    telemetria_service.actualizar_estado(estado_cancelado)
-    
-    # 3. Avisamos por WebSocket de manera garantizada
-    await ws_manager.broadcast_json({"tipo_evento": "cancelacion_demo", "vehiculo": id_vehiculo})
-    
-    # 4. Limpiamos el diccionario
-    if id_vehiculo in active_demo_tasks:
-        del active_demo_tasks[id_vehiculo]
+    try:
+        if id_vehiculo not in active_demo_tasks:
+            return {"mensaje": "No hay ninguna DEMO en curso para este vehículo."}
         
-    return {"mensaje": f"Se ha enviado la señal de detención al vehículo {id_vehiculo}."}
+        # 1. CORRECCIÓN CRÍTICA: Usamos .pop() para sacar la tarea del diccionario
+        # de forma segura antes de matarla. Esto evita "carreras" entre procesos.
+        tarea_activa = active_demo_tasks.pop(id_vehiculo)
+        tarea_activa.cancel()
+        
+        # 2. Restauramos la BD para que quede en Standby (comando 0)
+        estado_cancelado = EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=0, conectado=True)
+        telemetria_service.actualizar_estado(estado_cancelado)
+        
+        # 3. Avisamos por WebSocket de manera garantizada
+        await ws_manager.broadcast_json({"tipo_evento": "cancelacion_demo", "vehiculo": id_vehiculo})
+        
+        return {"mensaje": f"Se ha enviado la señal de detención al vehículo {id_vehiculo}."}
+    
+    except Exception as e:
+        # Si algo extraordinario pasa (ej. BD desconectada), en vez de un 500 ciego,
+        # arrojamos el texto exacto del error para saber qué corregir.
+        raise HTTPException(status_code=500, detail=f"Error interno al cancelar: {str(e)}")
