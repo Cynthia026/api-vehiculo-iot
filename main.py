@@ -44,10 +44,10 @@ async def custom_swagger_ui_html():
     <style>
         /* --- FONDO ROSA MUY SUTIL Y ELEGANTE --- */
         body, .swagger-ui {
-            background-color: #fcf0f4 !important; /* Blanco rosado pastel muy suave */
+            background-color: #fcf0f4 !important; 
         }
         .swagger-ui .scheme-container {
-            background-color: #fae6ec !important; /* Un rosa levamente más notorio para la franja */
+            background-color: #fae6ec !important; 
             box-shadow: none !important;
             border-bottom: 2px solid #f8d0db !important;
         }
@@ -69,13 +69,12 @@ async def custom_swagger_ui_html():
             flex-wrap: wrap !important;
         }
         
-        /* MAGIA CSS: Inyectamos el carrito y lo hacemos rosa rotando sus colores */
+        /* MAGIA CSS: Inyectamos el carrito magenta */
         .swagger-ui .info .title::before {
             content: "🚜";
             display: inline-block;
             margin-right: 12px;
             font-size: 1.1em;
-            /* Filtro que convierte el verde del tractor en rosa/magenta */
             filter: hue-rotate(200deg) saturate(3) brightness(1.1);
         }
 
@@ -127,10 +126,9 @@ async def custom_swagger_ui_html():
             font-weight: bold !important;
             display: flex !important;
             align-items: center !important;
-            justify-content: space-between !important; /* Separa el texto de la flechita */
+            justify-content: space-between !important; 
         }
         
-        /* Contenedor extra para agrupar el Título y el Contador */
         .swagger-ui .opblock-tag > div:first-child {
             display: flex !important;
             align-items: center !important;
@@ -164,12 +162,10 @@ async def custom_swagger_ui_html():
             const sections = document.querySelectorAll('.swagger-ui .opblock-tag-section');
             
             sections.forEach(section => {
-                // Quitamos el h4 para que no falle sin importar la versión de Swagger
                 const titleEl = section.querySelector('.opblock-tag');
                 const count = section.querySelectorAll('.opblock').length;
                 
                 if (titleEl && count > 0 && !titleEl.hasAttribute('data-counted')) {
-                    // Creamos el badge
                     const badge = document.createElement('span');
                     badge.style.backgroundColor = '#d81b60';
                     badge.style.color = '#ffffff';
@@ -180,10 +176,8 @@ async def custom_swagger_ui_html():
                     badge.style.fontWeight = 'bold';
                     badge.innerText = count + (count === 1 ? ' Endpoint' : ' Endpoints');
                     
-                    // Buscamos el enlace (a) que contiene el texto "Vehículos", "Comandos", etc.
                     const linkEl = titleEl.querySelector('a');
                     if (linkEl) {
-                        // Insertamos el contador justo al lado del texto
                         linkEl.parentNode.insertBefore(badge, linkEl.nextSibling);
                     }
                     
@@ -203,13 +197,6 @@ async def custom_swagger_ui_html():
     
     return HTMLResponse(final_html)
 
-@app.get("/health/db", tags=["Health Check"])
-def health_db():
-    is_connected = db_manager.test_connection()
-    return {
-        "rds_connected": is_connected,
-        "database": "vehiculo_iot"
-    }
 
 # --- REGISTRO DE ROUTERS ---
 app.include_router(vehiculos.router)
