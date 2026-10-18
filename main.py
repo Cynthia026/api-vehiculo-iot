@@ -29,20 +29,27 @@ app = FastAPI(
 # === RUTA PERSONALIZADA PARA CAMBIAR COLORES Y AGREGAR PIE DE PÁGINA ===
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui_html():
+    # Volvemos al tema claro de Swagger pero mantenemos el menú colapsado
     html_response = get_swagger_ui_html(
         openapi_url=app.openapi_url,
         title=app.title + " - Swagger UI",
-        swagger_css_url="https://cdn.jsdelivr.net/gh/Itz-fork/Fastapi-Swagger-UI-Dark/assets/swagger_ui_dark.min.css",
         swagger_ui_parameters={
             "defaultModelsExpandDepth": -1,
-            "docExpansion": "none", # <-- CAMBIO 1: Agrupa y colapsa los menús por defecto
-            "tryItOutEnabled": True,
-            "syntaxHighlight.theme": "obsidian"
+            "docExpansion": "none", # Agrupa y colapsa los menús por defecto
+            "tryItOutEnabled": True
         }
     )
     
     custom_css_and_footer = """
     <style>
+        /* --- FONDO ROSITA CLARO --- */
+        body {
+            background-color: #fff0f5 !important; /* Tono rosa pastel suave (Lavender Blush) */
+        }
+        .swagger-ui {
+            background-color: #fff0f5 !important;
+        }
+
         /* GET - Azul Claro */
         .swagger-ui .opblock.opblock-get { background-color: rgba(0, 168, 255, 0.08) !important; border-color: #00a8ff !important; }
         .swagger-ui .opblock.opblock-get .opblock-summary-method { background: #00a8ff !important; color: #fff !important; }
@@ -59,7 +66,7 @@ async def custom_swagger_ui_html():
         .swagger-ui .opblock.opblock-delete { background-color: rgba(232, 67, 147, 0.08) !important; border-color: #e84393 !important; }
         .swagger-ui .opblock.opblock-delete .opblock-summary-method { background: #e84393 !important; color: #fff !important; }
 
-        /* --- CORRECCIÓN DEFINITIVA: Rutas horizontales --- */
+        /* --- Rutas horizontales --- */
         .swagger-ui .opblock-summary {
             display: flex !important;
             align-items: center !important;
@@ -71,34 +78,36 @@ async def custom_swagger_ui_html():
             word-break: keep-all !important;
             overflow-wrap: normal !important;
             font-size: 15px !important;
-            display: inline-block !important; /* Fuerza a que ocupe el espacio horizontal necesario */
+            display: inline-block !important; 
             padding-right: 15px !important;
+            color: #333 !important; /* Texto oscuro para legibilidad */
         }
         .swagger-ui .opblock-summary-description {
             white-space: nowrap !important;
             overflow: hidden !important;
             text-overflow: ellipsis !important;
+            color: #555 !important;
         }
 
-        /* --- CAMBIO 2: Color de los Títulos Principales (Health Check, Vehículos, etc.) --- */
+        /* --- Títulos Principales (Health Check, Vehículos, etc.) combinados con Rosa --- */
         .swagger-ui .opblock-tag {
-            color: #00cec9 !important; /* Color Cyan brillante */
+            color: #d81b60 !important; /* Rosa oscuro intenso/Magenta */
             font-size: 22px !important;
-            border-bottom: 1px solid rgba(0, 206, 201, 0.3) !important;
+            border-bottom: 2px solid rgba(216, 27, 96, 0.2) !important;
             font-weight: bold !important;
         }
         .swagger-ui .opblock-tag svg {
-            fill: #00cec9 !important; /* Pinta la flechita desplegable del mismo color */
+            fill: #d81b60 !important; 
         }
 
-        /* Estilos del Footer */
+        /* Estilos del Footer adaptados a Modo Rosita */
         #custom-footer {
             text-align: center;
             padding: 20px;
             margin-top: 40px;
-            background-color: #1e1e1e;
-            border-top: 1px solid #333;
-            color: #d4d4d4;
+            background-color: #ffe4e8; /* Tono rosa un poco más oscuro que el fondo */
+            border-top: 1px solid #ffcdd2;
+            color: #495057;
             font-family: sans-serif;
             font-size: 14px;
             width: 100%;
@@ -109,23 +118,20 @@ async def custom_swagger_ui_html():
         Desarrollado por: <strong>Cynthia Martínez García</strong>
     </div>
 
-    <!-- CAMBIO 3: Script para contar endpoints y crear las etiquetas -->
+    <!-- Script para contar endpoints y crear las etiquetas -->
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            // Un observador que espera a que la página de Swagger termine de dibujar los menús
             const observer = new MutationObserver(function(mutations) {
                 const sections = document.querySelectorAll('.swagger-ui .opblock-tag-section');
                 if (sections.length > 0) {
                     sections.forEach(section => {
                         const titleEl = section.querySelector('h4.opblock-tag');
-                        // Cuenta cuántos endpoints hay en este grupo
                         const count = section.querySelectorAll('.opblock').length;
                         
-                        // Si el título existe y no le hemos puesto contador aún
                         if (titleEl && !titleEl.hasAttribute('data-counted')) {
                             const badge = document.createElement('span');
-                            badge.style.backgroundColor = '#00cec9'; // Fondo cyan
-                            badge.style.color = '#121212'; // Texto oscuro
+                            badge.style.backgroundColor = '#d81b60'; // Fondo rosa magenta
+                            badge.style.color = '#ffffff'; // Texto blanco
                             badge.style.borderRadius = '12px';
                             badge.style.padding = '3px 12px';
                             badge.style.marginLeft = '15px';
@@ -133,7 +139,6 @@ async def custom_swagger_ui_html():
                             badge.style.fontWeight = 'bold';
                             badge.innerText = count + (count === 1 ? ' Endpoint' : ' Endpoints');
                             
-                            // Lo insertamos dentro del título
                             titleEl.insertBefore(badge, titleEl.querySelector('button') || null);
                             titleEl.setAttribute('data-counted', 'true');
                         }
