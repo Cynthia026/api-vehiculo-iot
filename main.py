@@ -35,7 +35,7 @@ async def custom_swagger_ui_html():
         swagger_css_url="https://cdn.jsdelivr.net/gh/Itz-fork/Fastapi-Swagger-UI-Dark/assets/swagger_ui_dark.min.css",
         swagger_ui_parameters={
             "defaultModelsExpandDepth": -1,
-            "docExpansion": "list",
+            "docExpansion": "none", # <-- CAMBIO 1: Agrupa y colapsa los menús por defecto
             "tryItOutEnabled": True,
             "syntaxHighlight.theme": "obsidian"
         }
@@ -43,7 +43,7 @@ async def custom_swagger_ui_html():
     
     custom_css_and_footer = """
     <style>
-        /* GET - Azul Claro (Cyan/Sky Blue) */
+        /* GET - Azul Claro */
         .swagger-ui .opblock.opblock-get { background-color: rgba(0, 168, 255, 0.08) !important; border-color: #00a8ff !important; }
         .swagger-ui .opblock.opblock-get .opblock-summary-method { background: #00a8ff !important; color: #fff !important; }
         
@@ -59,27 +59,39 @@ async def custom_swagger_ui_html():
         .swagger-ui .opblock.opblock-delete { background-color: rgba(232, 67, 147, 0.08) !important; border-color: #e84393 !important; }
         .swagger-ui .opblock.opblock-delete .opblock-summary-method { background: #e84393 !important; color: #fff !important; }
 
-        /* --- CORRECCIÓN: Arreglo para que las rutas no salgan en vertical --- */
-        .swagger-ui .opblock .opblock-summary {
+        /* --- CORRECCIÓN DEFINITIVA: Rutas horizontales --- */
+        .swagger-ui .opblock-summary {
             display: flex !important;
-            flex-direction: row !important;
             align-items: center !important;
+            flex-wrap: nowrap !important;
         }
-        .swagger-ui .opblock .opblock-summary-path {
-            white-space: nowrap !important;  /* <- Esto fuerza a que el texto se mantenga en una línea */
-            word-break: normal !important;
-            flex: 0 1 auto !important;
-            padding-left: 10px !important;
+        .swagger-ui .opblock-summary-path,
+        .swagger-ui .opblock-summary-path a {
+            white-space: nowrap !important;
+            word-break: keep-all !important;
+            overflow-wrap: normal !important;
             font-size: 15px !important;
-            font-family: monospace !important;
+            display: inline-block !important; /* Fuerza a que ocupe el espacio horizontal necesario */
+            padding-right: 15px !important;
         }
-        .swagger-ui .opblock .opblock-summary-description {
-            padding-left: 15px !important;
-            flex: 1 1 auto !important;
-            text-align: left !important;
+        .swagger-ui .opblock-summary-description {
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
         }
 
-        /* Estilos del Footer adaptados a Modo Oscuro */
+        /* --- CAMBIO 2: Color de los Títulos Principales (Health Check, Vehículos, etc.) --- */
+        .swagger-ui .opblock-tag {
+            color: #00cec9 !important; /* Color Cyan brillante */
+            font-size: 22px !important;
+            border-bottom: 1px solid rgba(0, 206, 201, 0.3) !important;
+            font-weight: bold !important;
+        }
+        .swagger-ui .opblock-tag svg {
+            fill: #00cec9 !important; /* Pinta la flechita desplegable del mismo color */
+        }
+
+        /* Estilos del Footer */
         #custom-footer {
             text-align: center;
             padding: 20px;
@@ -96,14 +108,50 @@ async def custom_swagger_ui_html():
     <div id="custom-footer">
         Desarrollado por: <strong>Cynthia Martínez García</strong>
     </div>
+
+    <!-- CAMBIO 3: Script para contar endpoints y crear las etiquetas -->
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Un observador que espera a que la página de Swagger termine de dibujar los menús
+            const observer = new MutationObserver(function(mutations) {
+                const sections = document.querySelectorAll('.swagger-ui .opblock-tag-section');
+                if (sections.length > 0) {
+                    sections.forEach(section => {
+                        const titleEl = section.querySelector('h4.opblock-tag');
+                        // Cuenta cuántos endpoints hay en este grupo
+                        const count = section.querySelectorAll('.opblock').length;
+                        
+                        // Si el título existe y no le hemos puesto contador aún
+                        if (titleEl && !titleEl.hasAttribute('data-counted')) {
+                            const badge = document.createElement('span');
+                            badge.style.backgroundColor = '#00cec9'; // Fondo cyan
+                            badge.style.color = '#121212'; // Texto oscuro
+                            badge.style.borderRadius = '12px';
+                            badge.style.padding = '3px 12px';
+                            badge.style.marginLeft = '15px';
+                            badge.style.fontSize = '13px';
+                            badge.style.fontWeight = 'bold';
+                            badge.innerText = count + (count === 1 ? ' Endpoint' : ' Endpoints');
+                            
+                            // Lo insertamos dentro del título
+                            titleEl.insertBefore(badge, titleEl.querySelector('button') || null);
+                            titleEl.setAttribute('data-counted', 'true');
+                        }
+                    });
+                }
+            });
+            
+            observer.observe(document.body, { childList: true, subtree: true });
+        });
+    </script>
     """
     
     original_html = html_response.body.decode("utf-8")
     css_part = custom_css_and_footer.split('<div id="custom-footer">')[0]
-    footer_part = '<div id="custom-footer">' + custom_css_and_footer.split('<div id="custom-footer">')[1]
+    footer_and_script = '<div id="custom-footer">' + custom_css_and_footer.split('<div id="custom-footer">')[1]
 
     html_with_css = original_html.replace("</head>", css_part + "</head>")
-    final_html = html_with_css.replace("</body>", footer_part + "</body>")
+    final_html = html_with_css.replace("</body>", footer_and_script + "</body>")
     
     return HTMLResponse(final_html)
 
