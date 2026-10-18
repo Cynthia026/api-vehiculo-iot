@@ -29,25 +29,52 @@ app = FastAPI(
 # === RUTA PERSONALIZADA PARA CAMBIAR COLORES Y AGREGAR PIE DE PÁGINA ===
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui_html():
-    # Volvemos al tema claro de Swagger pero mantenemos el menú colapsado
     html_response = get_swagger_ui_html(
         openapi_url=app.openapi_url,
         title=app.title + " - Swagger UI",
         swagger_ui_parameters={
             "defaultModelsExpandDepth": -1,
-            "docExpansion": "none", # Agrupa y colapsa los menús por defecto
+            "docExpansion": "none", 
             "tryItOutEnabled": True
         }
     )
     
     custom_css_and_footer = """
     <style>
-        /* --- FONDO ROSITA CLARO --- */
-        body {
-            background-color: #fff0f5 !important; /* Tono rosa pastel suave (Lavender Blush) */
+        /* --- FONDO ROSA MÁS FUERTE --- */
+        body, .swagger-ui {
+            background-color: #ffe0e9 !important; /* Rosa más notorio y estético */
         }
-        .swagger-ui {
-            background-color: #fff0f5 !important;
+        .swagger-ui .scheme-container {
+            background-color: #ffd1dd !important; /* Cinta decorativa en rosa un poco más fuerte */
+            box-shadow: none !important;
+            border-bottom: 2px solid #ffb3c6 !important;
+        }
+
+        /* --- CENTRAR EL TÍTULO Y LA DESCRIPCIÓN --- */
+        .swagger-ui .info {
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: center !important;
+            text-align: center !important;
+            margin-top: 40px !important;
+        }
+        .swagger-ui .info .title {
+            display: flex !important;
+            justify-content: center !important;
+            align-items: center !important;
+            width: 100% !important;
+            flex-wrap: wrap !important;
+        }
+        .swagger-ui .info .description {
+            text-align: center !important;
+            margin: 0 auto !important;
+            max-width: 800px !important;
+        }
+        .swagger-ui .info .base-url {
+            display: flex !important;
+            justify-content: center !important;
+            width: 100% !important;
         }
 
         /* GET - Azul Claro */
@@ -80,7 +107,7 @@ async def custom_swagger_ui_html():
             font-size: 15px !important;
             display: inline-block !important; 
             padding-right: 15px !important;
-            color: #333 !important; /* Texto oscuro para legibilidad */
+            color: #333 !important;
         }
         .swagger-ui .opblock-summary-description {
             white-space: nowrap !important;
@@ -89,24 +116,26 @@ async def custom_swagger_ui_html():
             color: #555 !important;
         }
 
-        /* --- Títulos Principales (Health Check, Vehículos, etc.) combinados con Rosa --- */
+        /* --- Títulos Principales --- */
         .swagger-ui .opblock-tag {
             color: #d81b60 !important; /* Rosa oscuro intenso/Magenta */
             font-size: 22px !important;
-            border-bottom: 2px solid rgba(216, 27, 96, 0.2) !important;
+            border-bottom: 2px solid rgba(216, 27, 96, 0.3) !important;
             font-weight: bold !important;
+            display: flex !important;
+            align-items: center !important;
         }
         .swagger-ui .opblock-tag svg {
             fill: #d81b60 !important; 
         }
 
-        /* Estilos del Footer adaptados a Modo Rosita */
+        /* Estilos del Footer */
         #custom-footer {
             text-align: center;
             padding: 20px;
             margin-top: 40px;
-            background-color: #ffe4e8; /* Tono rosa un poco más oscuro que el fondo */
-            border-top: 1px solid #ffcdd2;
+            background-color: #ffc4d4; 
+            border-top: 1px solid #ffb3c6;
             color: #495057;
             font-family: sans-serif;
             font-size: 14px;
@@ -118,36 +147,48 @@ async def custom_swagger_ui_html():
         Desarrollado por: <strong>Cynthia Martínez García</strong>
     </div>
 
-    <!-- Script para contar endpoints y crear las etiquetas -->
+    <!-- Script de Magia: Pinta el carrito de rosa y asegura los contadores -->
     <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            const observer = new MutationObserver(function(mutations) {
-                const sections = document.querySelectorAll('.swagger-ui .opblock-tag-section');
-                if (sections.length > 0) {
-                    sections.forEach(section => {
-                        const titleEl = section.querySelector('h4.opblock-tag');
-                        const count = section.querySelectorAll('.opblock').length;
-                        
-                        if (titleEl && !titleEl.hasAttribute('data-counted')) {
-                            const badge = document.createElement('span');
-                            badge.style.backgroundColor = '#d81b60'; // Fondo rosa magenta
-                            badge.style.color = '#ffffff'; // Texto blanco
-                            badge.style.borderRadius = '12px';
-                            badge.style.padding = '3px 12px';
-                            badge.style.marginLeft = '15px';
-                            badge.style.fontSize = '13px';
-                            badge.style.fontWeight = 'bold';
-                            badge.innerText = count + (count === 1 ? ' Endpoint' : ' Endpoints');
-                            
-                            titleEl.insertBefore(badge, titleEl.querySelector('button') || null);
-                            titleEl.setAttribute('data-counted', 'true');
-                        }
-                    });
+        // Usamos setInterval para que escanee la página cada segundo y garantice los cambios
+        setInterval(() => {
+            // 1. PINTAR EL CARRITO DE ROSA (Filtro CSS)
+            const titleSpan = document.querySelector('.swagger-ui .info .title span');
+            if (titleSpan && !titleSpan.hasAttribute('data-pink')) {
+                // Reemplazamos el emoji por uno envuelto en un span con filtro que convierte verde en rosa
+                titleSpan.innerHTML = titleSpan.innerHTML.replace('🚜', '<span style="filter: hue-rotate(220deg) saturate(2) brightness(1.2); display: inline-block;">🚜</span>');
+                titleSpan.setAttribute('data-pink', 'true');
+            }
+
+            // 2. AGREGAR CONTADORES DE ENDPOINTS GARANTIZADOS
+            const sections = document.querySelectorAll('.swagger-ui .opblock-tag-section');
+            sections.forEach(section => {
+                const titleEl = section.querySelector('h4.opblock-tag');
+                const count = section.querySelectorAll('.opblock').length;
+                
+                // Si la sección tiene endpoints y aún no le ponemos la etiqueta
+                if (titleEl && count > 0 && !titleEl.hasAttribute('data-counted')) {
+                    const badge = document.createElement('span');
+                    badge.style.backgroundColor = '#d81b60'; // Fondo rosa magenta
+                    badge.style.color = '#ffffff'; // Texto blanco
+                    badge.style.borderRadius = '12px';
+                    badge.style.padding = '4px 12px';
+                    badge.style.marginLeft = '15px';
+                    badge.style.fontSize = '13px';
+                    badge.style.fontWeight = 'bold';
+                    badge.innerText = count + (count === 1 ? ' Endpoint' : ' Endpoints');
+                    
+                    // Insertar la etiqueta justo antes de la flechita de desplegar
+                    const arrowBtn = titleEl.querySelector('button');
+                    if (arrowBtn) {
+                        titleEl.insertBefore(badge, arrowBtn);
+                    } else {
+                        titleEl.appendChild(badge);
+                    }
+                    
+                    titleEl.setAttribute('data-counted', 'true');
                 }
             });
-            
-            observer.observe(document.body, { childList: true, subtree: true });
-        });
+        }, 1000); 
     </script>
     """
     
