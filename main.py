@@ -1,9 +1,10 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 from app.database import db_manager
-from app.routers import vehiculos, comandos, telemetria, demos
+from app.routers import vehiculos, comandos, telemetria, demos, auth, administracion, mis_vehiculos
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -11,6 +12,8 @@ async def lifespan(app: FastAPI):
     print(" Verificando conexión a Amazon RDS (vehiculo_iot)...")
     if db_manager.test_connection():
         print(" [OK] Conexión establecida exitosamente con Amazon RDS.")
+        if db_manager.ensure_schema_4_3():
+            print(" [OK] Esquema 4.3 (Administración, Roles y Auditoría) verificado en RDS.")
     else:
         print(" [ADVERTENCIA] No se pudo conectar a RDS.")
         print(" -> Revisa tu archivo .env y el Security Group (puerto 3306).")
@@ -18,14 +21,33 @@ async def lifespan(app: FastAPI):
     yield
     print("\n--- Servidor detenido. ---")
 
-# QUITAMOS EL CARRITO DE AQUÍ PARA INYECTARLO CON CSS
 app = FastAPI(
-    title="API Control y Telemetría - Excavadora IoT",
-    description="Documentación oficial de los endpoints REST y WebSockets para el control remoto y monitoreo del vehículo.",
-    version="1.0.0",
+    title="API Control, Monitoreo y Administración - Vehículos IoT",
+    description="Documentación oficial de los endpoints REST y WebSockets para Control (4.1), Monitoreo (4.2) y Administración Multiusuario con RBAC (4.3).",
+    version="2.0.0",
     lifespan=lifespan,
     docs_url=None  
 )
+
+# --- CONFIGURACIÓN CORS PARA FRONTEND (GitHub Pages / Local) ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- ENDPOINT DE DIAGNÓSTICO DE SALUD Y AMAZON RDS ---
+@app.get("/api/health", tags=["Diagnóstico de Salud"])
+def verificar_salud_sistema():
+    """Verifica disponibilidad de la API en AWS EC2 y conectividad en vivo con Amazon RDS."""
+    rds_ok = db_manager.test_connection()
+    return {
+        "status": "ok" if rds_ok else "degraded",
+        "api": "Disponible",
+        "rds": "Disponible" if rds_ok else "No disponible"
+    }
 
 # === RUTA PERSONALIZADA PARA CAMBIAR COLORES Y AGREGAR PIE DE PÁGINA ===
 @app.get("/docs", include_in_schema=False)
@@ -198,7 +220,10 @@ async def custom_swagger_ui_html():
     return HTMLResponse(final_html)
 
 
-# --- REGISTRO DE ROUTERS ---
+# --- REGISTRO DE ROUTERS (4.1 Control, 4.2 Monitoreo y 4.3 Administración) ---
+app.include_router(auth.router)
+app.include_router(administracion.router)
+app.include_router(mis_vehiculos.router)
 app.include_router(vehiculos.router)
 app.include_router(comandos.router)
 app.include_router(telemetria.router)

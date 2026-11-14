@@ -1,0 +1,364 @@
+from fastapi import APIRouter, HTTPException, status, Depends
+from typing import Dict, Any, List, Optional
+from app.database import db_manager
+from app.security import require_roles, hash_password, registrar_auditoria, limpiar_sesiones_expiradas
+from app.schemas.administracion import (
+    ModeloCatalogoCreate,
+    UnidadAdminCreate,
+    UnidadAdminUpdate,
+    ClienteCreate,
+    AsignacionCreate
+)
+
+router = APIRouter(prefix="/api/admin", tags=["Administración Comercial (4.3)"])
+
+
+@router.get("/dashboard")
+def obtener_dashboard_admin(user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    """
+    Devuelve métricas reales de RDS, inventario de unidades con propietario,
+    modelos comerciales, clientes compradores y bitácora reciente.
+    """
+    limpiar_sesiones_expiradas()
+
+    unidades = db_manager.execute_query(
+        """
+        SELECT v.id_vehiculo, v.nombre, v.modelo, v.descripcion, v.microcontrolador,
+               v.fecha_registro, v.activo, v.id_modelo,
+               COALESCE(v.numero_serie, CONCAT('SN-00', v.id_vehiculo)) AS numero_serie,
+               COALESCE(v.estado_comercial, 'DISPONIBLE') AS estado_comercial,
+               COALESCE(v.soporte_autorizado, 0) AS soporte_autorizado,
+               v.soporte_expira_en,
+               a.id_asignacion,
+               a.id_usuario AS id_propietario,
+               u.nombre AS nombre_propietario,
+               u.email AS email_propietario,
+               ev.conectado,
+               c.nombre AS ultimo_comando,
+               ev.fecha_actualizacion
+        FROM vehiculos v
+        LEFT JOIN asignaciones_vehiculo a ON a.id_vehiculo = v.id_vehiculo AND a.activo = 1
+        LEFT JOIN usuarios u ON u.id_usuario = a.id_usuario
+        LEFT JOIN estado_vehiculo ev ON ev.id_vehiculo = v.id_vehiculo
+        LEFT JOIN comandos c ON c.id_comando = ev.id_comando
+        ORDER BY v.id_vehiculo
+        """
+    )
+
+    modelos = db_manager.execute_query(
+        "SELECT * FROM modelos_catalogo ORDER BY id_modelo"
+    )
+
+    clientes = db_manager.execute_query(
+        """
+        SELECT u.id_usuario, u.nombre, u.email, u.activo, u.fecha_registro,
+               r.codigo AS rol,
+               COUNT(a.id_asignacion) AS total_unidades
+        FROM usuarios u
+        INNER JOIN roles r ON r.id_rol = u.id_rol
+        LEFT JOIN asignaciones_vehiculo a ON a.id_usuario = u.id_usuario AND a.activo = 1
+        WHERE r.codigo = 'USUARIO'
+        GROUP BY u.id_usuario, u.nombre, u.email, u.activo, u.fecha_registro, r.codigo
+        ORDER BY u.id_usuario
+        """
+    )
+
+    sesiones_activas = db_manager.execute_query(
+        """
+        SELECT s.id_sesion, s.id_vehiculo, v.nombre AS nombre_vehiculo,
+               s.nombre_operador, s.tipo_sesion, s.inicio_en, s.expira_en,
+               TIMESTAMPDIFF(SECOND, NOW(), s.expira_en) AS segundos_restantes
+        FROM sesiones_control s
+        INNER JOIN vehiculos v ON v.id_vehiculo = s.id_vehiculo
+        WHERE s.activa = 1 AND s.expira_en > NOW()
+        ORDER BY s.inicio_en DESC
+        """
+    )
+
+    auditoria = db_manager.execute_query(
+        """
+        SELECT b.id_auditoria, b.id_usuario, COALESCE(u.nombre, 'Visitante / Sistema') AS actor,
+               b.rol, b.accion, b.entidad, b.id_recurso, b.detalle, b.fecha_hora
+        FROM bitacora_auditoria b
+        LEFT JOIN usuarios u ON u.id_usuario = b.id_usuario
+        ORDER BY b.id_auditoria DESC
+        LIMIT 25
+        """
+    )
+
+    total_unidades = len(unidades)
+    vendidas = sum(1 for u in unidades if u.get("estado_comercial") == "VENDIDO")
+    exhibicion = sum(1 for u in unidades if u.get("estado_comercial") == "EXHIBICION")
+    disponibles = sum(1 for u in unidades if u.get("estado_comercial") == "DISPONIBLE")
+
+    return {
+        "metricas": {
+            "total_unidades": total_unidades,
+            "unidades_vendidas": vendidas,
+            "unidades_exhibicion": exhibicion,
+            "unidades_disponibles": disponibles,
+            "total_modelos": len(modelos),
+            "total_clientes": len(clientes),
+            "sesiones_invitado_activas": len(sesiones_activas)
+        },
+        "unidades": unidades,
+        "modelos": modelos,
+        "clientes": clientes,
+        "sesiones_activas": sesiones_activas,
+        "auditoria": auditoria
+    }
+
+
+@router.get("/modelos")
+def listar_modelos(user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    return db_manager.execute_query("SELECT * FROM modelos_catalogo ORDER BY id_modelo")
+
+
+@router.post("/modelos", status_code=status.HTTP_201_CREATED)
+def crear_modelo(modelo: ModeloCatalogoCreate, user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    existe = db_manager.execute_query(
+        "SELECT id_modelo FROM modelos_catalogo WHERE UPPER(codigo_modelo) = UPPER(%s)",
+        (modelo.codigo_modelo.strip(),)
+    )
+    if existe:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El código de modelo comercial ya existe.")
+
+    res = db_manager.execute_write(
+        """
+        INSERT INTO modelos_catalogo (codigo_modelo, nombre, descripcion, microcontrolador_default, tiene_brazo, tiene_motores_giro, activo)
+        VALUES (%s, %s, %s, %s, %s, %s, 1)
+        """,
+        (
+            modelo.codigo_modelo.strip().upper(),
+            modelo.nombre.strip(),
+            modelo.descripcion,
+            modelo.microcontrolador_default.strip(),
+            1 if modelo.tiene_brazo else 0,
+            1 if modelo.tiene_motores_giro else 0
+        )
+    )
+    id_nuevo = res["lastrowid"]
+    registrar_auditoria(
+        user["id_usuario"], "ADMIN", "ALTA_MODELO", "modelos_catalogo", id_nuevo,
+        f"Modelo comercial '{modelo.nombre}' ({modelo.codigo_modelo}) registrado"
+    )
+    creado = db_manager.execute_query("SELECT * FROM modelos_catalogo WHERE id_modelo = %s", (id_nuevo,))
+    return creado[0] if creado else {"id_modelo": id_nuevo}
+
+
+@router.post("/unidades", status_code=status.HTTP_201_CREATED)
+def registrar_unidad_fisica(unidad: UnidadAdminCreate, user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    """
+    Registra una nueva unidad física en `vehiculos`, clona la plantilla de comandos
+    del modelo comercial e inicializa su registro en `estado_vehiculo`.
+    """
+    serie = unidad.numero_serie.strip().upper()
+    dup = db_manager.execute_query("SELECT id_vehiculo FROM vehiculos WHERE UPPER(numero_serie) = %s", (serie,))
+    if dup:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"El número de serie '{serie}' ya está registrado.")
+
+    nombre_modelo = unidad.modelo or "Excavadora IoT"
+    tiene_brazo = True
+    if unidad.id_modelo:
+        mod = db_manager.execute_query("SELECT * FROM modelos_catalogo WHERE id_modelo = %s", (unidad.id_modelo,))
+        if mod:
+            nombre_modelo = mod[0]["nombre"]
+            tiene_brazo = bool(mod[0].get("tiene_brazo", 1))
+
+    res = db_manager.execute_write(
+        """
+        INSERT INTO vehiculos (nombre, modelo, descripcion, microcontrolador, activo, id_modelo, numero_serie, estado_comercial, soporte_autorizado)
+        VALUES (%s, %s, %s, %s, 1, %s, %s, %s, 0)
+        """,
+        (
+            unidad.nombre.strip(),
+            nombre_modelo,
+            unidad.descripcion,
+            unidad.microcontrolador.strip(),
+            unidad.id_modelo,
+            serie,
+            unidad.estado_comercial
+        )
+    )
+    id_nuevo = res["lastrowid"]
+
+    # Clonar comandos base desde la Unidad 1 respetando si el modelo tiene brazo hidráulico
+    db_manager.execute_write(
+        """
+        INSERT INTO comandos (id_vehiculo, nombre, codigo, descripcion, activo)
+        SELECT %s, c.nombre, c.codigo, c.descripcion,
+               CASE WHEN %s = 0 AND c.nombre IN ('SUBIR_BRAZO', 'BAJAR_BRAZO') THEN 0 ELSE c.activo END
+        FROM comandos c
+        WHERE c.id_vehiculo = 1
+        """,
+        (id_nuevo, 1 if tiene_brazo else 0)
+    )
+
+    # Inicializar fila en estado_vehiculo con el comando Detener de la nueva unidad
+    cmd_stop = db_manager.execute_query(
+        "SELECT id_comando FROM comandos WHERE id_vehiculo = %s AND LOWER(nombre) = 'detener' LIMIT 1",
+        (id_nuevo,)
+    )
+    if cmd_stop:
+        db_manager.execute_write(
+            "INSERT INTO estado_vehiculo (id_vehiculo, id_comando, conectado) VALUES (%s, %s, 1)",
+            (id_nuevo, cmd_stop[0]["id_comando"])
+        )
+
+    registrar_auditoria(
+        user["id_usuario"], "ADMIN", "ALTA_UNIDAD", "vehiculos", id_nuevo,
+        f"Unidad física '{unidad.nombre}' (Serie: {serie}, Estado: {unidad.estado_comercial}) creada"
+    )
+    nueva = db_manager.execute_query("SELECT * FROM vehiculos WHERE id_vehiculo = %s", (id_nuevo,))
+    return nueva[0] if nueva else {"id_vehiculo": id_nuevo}
+
+
+@router.put("/unidades/{id_vehiculo}")
+def actualizar_unidad_fisica(
+    id_vehiculo: int,
+    datos: UnidadAdminUpdate,
+    user: Dict[str, Any] = Depends(require_roles("ADMIN"))
+):
+    db_manager.execute_write(
+        """
+        UPDATE vehiculos
+        SET nombre = %s, modelo = %s, numero_serie = COALESCE(%s, numero_serie),
+            descripcion = %s, microcontrolador = %s, estado_comercial = %s, activo = %s
+        WHERE id_vehiculo = %s
+        """,
+        (
+            datos.nombre.strip(),
+            datos.modelo.strip(),
+            datos.numero_serie.strip().upper() if datos.numero_serie else None,
+            datos.descripcion,
+            datos.microcontrolador.strip(),
+            datos.estado_comercial,
+            1 if datos.activo else 0,
+            id_vehiculo
+        )
+    )
+    registrar_auditoria(
+        user["id_usuario"], "ADMIN", "EDICION_UNIDAD", "vehiculos", id_vehiculo,
+        f"Unidad #{id_vehiculo} actualizada ({datos.nombre}, Estado: {datos.estado_comercial})"
+    )
+    actualizado = db_manager.execute_query("SELECT * FROM vehiculos WHERE id_vehiculo = %s", (id_vehiculo,))
+    return actualizado[0] if actualizado else {"id_vehiculo": id_vehiculo}
+
+
+@router.get("/clientes")
+def listar_clientes(user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    return db_manager.execute_query(
+        """
+        SELECT u.id_usuario, u.nombre, u.email, u.activo, u.fecha_registro,
+               COUNT(a.id_asignacion) AS total_unidades
+        FROM usuarios u
+        INNER JOIN roles r ON r.id_rol = u.id_rol
+        LEFT JOIN asignaciones_vehiculo a ON a.id_usuario = u.id_usuario AND a.activo = 1
+        WHERE r.codigo = 'USUARIO'
+        GROUP BY u.id_usuario, u.nombre, u.email, u.activo, u.fecha_registro
+        ORDER BY u.id_usuario
+        """
+    )
+
+
+@router.post("/clientes", status_code=status.HTTP_201_CREATED)
+def registrar_cliente(cliente: ClienteCreate, user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    email = cliente.email.strip().lower()
+    dup = db_manager.execute_query("SELECT id_usuario FROM usuarios WHERE LOWER(email) = %s", (email,))
+    if dup:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El correo electrónico ya está registrado.")
+
+    rol_user = db_manager.execute_query("SELECT id_rol FROM roles WHERE codigo = 'USUARIO' LIMIT 1")
+    id_rol = rol_user[0]["id_rol"] if rol_user else 2
+
+    pwd_hash = hash_password(cliente.password)
+    res = db_manager.execute_write(
+        """
+        INSERT INTO usuarios (id_rol, nombre, email, password_hash, activo)
+        VALUES (%s, %s, %s, %s, 1)
+        """,
+        (id_rol, cliente.nombre.strip(), email, pwd_hash)
+    )
+    id_nuevo = res["lastrowid"]
+    registrar_auditoria(
+        user["id_usuario"], "ADMIN", "ALTA_CLIENTE", "usuarios", id_nuevo,
+        f"Cliente comprador '{cliente.nombre}' ({email}) registrado"
+    )
+    return {
+        "id_usuario": id_nuevo,
+        "nombre": cliente.nombre.strip(),
+        "email": email,
+        "activo": 1
+    }
+
+
+@router.post("/asignaciones", status_code=status.HTTP_201_CREATED)
+def asignar_unidad_a_cliente(datos: AsignacionCreate, user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    """Asigna una unidad física a un cliente comprador y marca la unidad como VENDIDO."""
+    # Desactivar asignaciones previas de esa unidad
+    db_manager.execute_write(
+        "UPDATE asignaciones_vehiculo SET activo = 0 WHERE id_vehiculo = %s AND activo = 1",
+        (datos.id_vehiculo,)
+    )
+
+    res = db_manager.execute_write(
+        """
+        INSERT INTO asignaciones_vehiculo (id_vehiculo, id_usuario, notas, activo)
+        VALUES (%s, %s, %s, 1)
+        """,
+        (datos.id_vehiculo, datos.id_usuario, datos.notas or "Asignación comercial desde panel Admin")
+    )
+
+    db_manager.execute_write(
+        "UPDATE vehiculos SET estado_comercial = 'VENDIDO', soporte_autorizado = 0 WHERE id_vehiculo = %s",
+        (datos.id_vehiculo,)
+    )
+
+    registrar_auditoria(
+        user["id_usuario"], "ADMIN", "ASIGNACION_UNIDAD", "asignaciones_vehiculo", datos.id_vehiculo,
+        f"Unidad #{datos.id_vehiculo} asignada al cliente #{datos.id_usuario}"
+    )
+    return {
+        "id_asignacion": res["lastrowid"],
+        "id_vehiculo": datos.id_vehiculo,
+        "id_usuario": datos.id_usuario,
+        "mensaje": "Unidad asignada exitosamente al comprador."
+    }
+
+
+@router.delete("/asignaciones/{id_vehiculo}")
+def revocar_asignacion_unidad(
+    id_vehiculo: int,
+    nuevo_estado: str = "DISPONIBLE",
+    user: Dict[str, Any] = Depends(require_roles("ADMIN"))
+):
+    """Desvincula la unidad del comprador actual y actualiza su estado comercial (DISPONIBLE o EXHIBICION)."""
+    db_manager.execute_write(
+        "UPDATE asignaciones_vehiculo SET activo = 0 WHERE id_vehiculo = %s AND activo = 1",
+        (id_vehiculo,)
+    )
+    estado_valido = nuevo_estado if nuevo_estado in ("DISPONIBLE", "EXHIBICION", "MANTENIMIENTO") else "DISPONIBLE"
+    db_manager.execute_write(
+        "UPDATE vehiculos SET estado_comercial = %s, soporte_autorizado = 0, soporte_expira_en = NULL WHERE id_vehiculo = %s",
+        (estado_valido, id_vehiculo)
+    )
+    registrar_auditoria(
+        user["id_usuario"], "ADMIN", "REVOCACION_UNIDAD", "asignaciones_vehiculo", id_vehiculo,
+        f"Asignación de unidad #{id_vehiculo} revocada -> nuevo estado: {estado_valido}"
+    )
+    return {"mensaje": f"Asignación revocada. La unidad #{id_vehiculo} ahora está en estado {estado_valido}."}
+
+
+@router.get("/auditoria")
+def consultar_bitacora(limit: int = 40, user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    return db_manager.execute_query(
+        """
+        SELECT b.id_auditoria, b.id_usuario, COALESCE(u.nombre, 'Visitante / Sistema') AS actor,
+               b.rol, b.accion, b.entidad, b.id_recurso, b.detalle, b.fecha_hora
+        FROM bitacora_auditoria b
+        LEFT JOIN usuarios u ON u.id_usuario = b.id_usuario
+        ORDER BY b.id_auditoria DESC
+        LIMIT %s
+        """,
+        (min(limit, 100),)
+    )
