@@ -37,20 +37,23 @@ def _obtener_id_comando_detener(id_vehiculo: int) -> int:
 
 @router.websocket("/ws/{id_vehiculo}")
 async def websocket_endpoint(websocket: WebSocket, id_vehiculo: int):
-    # Si el cliente envía ?token=..., validamos su autorización sobre la unidad antes de aceptar
-    token = websocket.query_params.get("token")
-    if token:
-        try:
-            user = decode_access_token(token)
-            verificar_acceso_vehiculo(id_vehiculo, user, modo="lectura")
-        except HTTPException:
-            await websocket.close(code=4003)
-            return
-
     await ws_manager.connect(websocket, id_vehiculo)
     try:
         while True:
-            data = await websocket.receive_text()
+            raw_text = await websocket.receive_text()
+            # Autenticación segura por mensaje JSON (sin exponer JWT en la URL ni en logs del servidor)
+            try:
+                import json
+                msg = json.loads(raw_text)
+                if isinstance(msg, dict) and msg.get("tipo_evento") == "auth_ws" and msg.get("token"):
+                    user = decode_access_token(msg["token"])
+                    verificar_acceso_vehiculo(id_vehiculo, user, modo="lectura")
+            except HTTPException:
+                ws_manager.disconnect(websocket, id_vehiculo)
+                await websocket.close(code=4003)
+                return
+            except Exception:
+                pass
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket, id_vehiculo)
 
