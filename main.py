@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import ResponseValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -37,6 +39,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- ERRORES DE VALIDACIÓN DE RESPUESTA ---
+# Se responden como JSON con detalle (y con encabezados CORS) en vez de un 500 opaco que el navegador bloquea.
+@app.exception_handler(ResponseValidationError)
+async def manejar_error_respuesta(request: Request, exc: ResponseValidationError):
+    print(f"[ERROR RESPUESTA] {request.method} {request.url.path}: {exc.errors()}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "La respuesta del servidor no coincide con el formato esperado.", "errores": exc.errors()},
+    )
+
 
 # --- ENDPOINT DE DIAGNÓSTICO DE SALUD Y AMAZON RDS ---
 @app.get("/api/health", tags=["Diagnóstico de Salud"])

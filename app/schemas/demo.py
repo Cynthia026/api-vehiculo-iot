@@ -34,8 +34,13 @@ class MovimientoDemoUpdate(BaseModel):
     duracion_ms: int
     pausa_ms: int
 
-class MovimientoDemoResponse(MovimientoDemoCreate):
-    id_demo_movimiento: int
+class MovimientoDemoResponse(BaseModel):
+    id_demo_movimiento: Optional[int] = None
+    id_demo: int
+    id_comando: Optional[int] = None
+    orden: int
+    duracion_ms: int
+    pausa_ms: int
     comando: Optional[str] = None
     codigo: Optional[int] = None
 
