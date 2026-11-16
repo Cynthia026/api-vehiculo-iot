@@ -23,9 +23,15 @@ async def vigilar_sesiones_invitado(intervalo_seg: int = 5):
 
     while True:
         try:
+            # Solicitudes de préstamo que nadie atendió en 5 minutos
+            await asyncio.to_thread(
+                db_manager.execute_write,
+                "UPDATE solicitudes_invitado SET estado = 'EXPIRADA', resuelta_en = NOW() "
+                "WHERE estado = 'PENDIENTE' AND creada_en <= NOW() - INTERVAL 300 SECOND"
+            )
             vencidas = await asyncio.to_thread(
                 db_manager.execute_query,
-                "SELECT id_sesion, id_vehiculo, nombre_operador FROM sesiones_control WHERE activa = 1 AND expira_en <= NOW()"
+                "SELECT id_sesion, id_vehiculo, nombre_operador, tipo_sesion FROM sesiones_control WHERE activa = 1 AND expira_en <= NOW()"
             )
             for ses in vencidas or []:
                 cerrada = await asyncio.to_thread(
@@ -35,6 +41,11 @@ async def vigilar_sesiones_invitado(intervalo_seg: int = 5):
                 )
                 if not cerrada.get("rowcount"):
                     continue  # otro proceso ya la cerró
+                await asyncio.to_thread(
+                    db_manager.execute_write,
+                    "UPDATE solicitudes_invitado SET estado = 'FINALIZADA' WHERE id_sesion = %s AND estado = 'APROBADA'",
+                    (ses["id_sesion"],)
+                )
                 id_v = int(ses["id_vehiculo"])
                 tarea = active_demo_tasks.pop(id_v, None)
                 if tarea:
@@ -52,7 +63,8 @@ async def vigilar_sesiones_invitado(intervalo_seg: int = 5):
                 await ws_manager.broadcast_json({"tipo_evento": "sesion_invitado_expirada", "vehiculo": id_v})
                 await asyncio.to_thread(
                     registrar_auditoria, None, "SISTEMA", "EXPIRACION_INVITADO", "sesiones_control", id_v,
-                    f"Prueba de '{ses.get('nombre_operador') or 'Invitado'}' vencida: unidad #{id_v} detenida y liberada"
+                    f"{'Préstamo del vehículo físico' if ses.get('tipo_sesion') == 'PRESTAMO_FISICO' else 'Prueba'} de "
+                    f"'{ses.get('nombre_operador') or 'Invitado'}' vencida: unidad #{id_v} detenida y liberada"
                 )
         except asyncio.CancelledError:
             raise

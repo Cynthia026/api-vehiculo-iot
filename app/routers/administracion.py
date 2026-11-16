@@ -1,7 +1,13 @@
 from fastapi import APIRouter, HTTPException, status, Depends
 from typing import Dict, Any, List, Optional
 from app.database import db_manager
-from app.security import require_roles, hash_password, registrar_auditoria, limpiar_sesiones_expiradas
+import secrets
+from fastapi.encoders import jsonable_encoder
+from app.security import (
+    require_roles, hash_password, registrar_auditoria, limpiar_sesiones_expiradas,
+    obtener_prestamo_activo, TIPO_PRESTAMO_FISICO, UNIDAD_FISICA_ID, GUEST_TTL_SECONDS,
+    SOLICITUD_PENDIENTE_TTL_SECONDS
+)
 from app.schemas.administracion import (
     ModeloCatalogoCreate,
     UnidadAdminCreate,
@@ -496,3 +502,178 @@ def consultar_bitacora(limit: int = 40, user: Dict[str, Any] = Depends(require_r
         """,
         (min(limit, 100),)
     )
+
+
+
+# ---------------------------------------------------------------------------------------------
+# SOLICITUDES DE INVITADO PARA MANEJAR EL VEHÍCULO FÍSICO
+# ---------------------------------------------------------------------------------------------
+
+def _expirar_solicitudes_pendientes() -> None:
+    db_manager.execute_write(
+        """
+        UPDATE solicitudes_invitado SET estado = 'EXPIRADA', resuelta_en = NOW()
+        WHERE estado = 'PENDIENTE' AND creada_en <= NOW() - INTERVAL %s SECOND
+        """,
+        (SOLICITUD_PENDIENTE_TTL_SECONDS,)
+    )
+
+
+async def _detener_unidad(id_vehiculo: int) -> None:
+    """Cancela la demo en curso y manda DETENER (al cambiar de operador el vehículo debe quedar quieto)."""
+    from app.routers.demos import active_demo_tasks, _obtener_id_comando_detener
+    from app.services.telemetria_service import telemetria_service
+    from app.schemas.estado import EstadoVehiculoUpdate
+    from app.websocket.manager import ws_manager
+    tarea = active_demo_tasks.pop(int(id_vehiculo), None)
+    if tarea:
+        tarea.cancel()
+    try:
+        id_stop = _obtener_id_comando_detener(id_vehiculo)
+        estado = telemetria_service.actualizar_estado(EstadoVehiculoUpdate(id_vehiculo=id_vehiculo, id_comando=id_stop, conectado=True))
+        await ws_manager.broadcast_json({
+            "tipo_evento": "movimiento_individual", "vehiculo": id_vehiculo,
+            "datos": jsonable_encoder(estado or {"id_vehiculo": id_vehiculo, "id_comando": id_stop, "comando": "DETENER"})
+        })
+    except Exception as e:
+        print(f"[PRESTAMO STOP WARN] {e}")
+
+
+@router.get("/solicitudes-invitado")
+def listar_solicitudes_invitado(user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    """Solicitudes en espera y préstamo físico en curso (el panel del Admin las consulta cada pocos segundos)."""
+    _expirar_solicitudes_pendientes()
+    pendientes = db_manager.execute_query(
+        """
+        SELECT s.id_solicitud, s.id_vehiculo, s.nombre_visitante, s.creada_en,
+               TIMESTAMPDIFF(SECOND, s.creada_en, NOW()) AS segundos_esperando
+        FROM solicitudes_invitado s
+        WHERE s.estado = 'PENDIENTE'
+        ORDER BY s.creada_en
+        """
+    )
+    unidad = db_manager.execute_query(
+        """
+        SELECT v.id_vehiculo, v.nombre, COALESCE(v.estado_comercial, 'DISPONIBLE') AS estado_comercial,
+               u.nombre AS nombre_propietario
+        FROM vehiculos v
+        LEFT JOIN asignaciones_vehiculo a ON a.id_vehiculo = v.id_vehiculo AND a.activo = 1
+        LEFT JOIN usuarios u ON u.id_usuario = a.id_usuario
+        WHERE v.id_vehiculo = %s LIMIT 1
+        """,
+        (UNIDAD_FISICA_ID,)
+    )
+    return {
+        "unidad_fisica": unidad[0] if unidad else {"id_vehiculo": UNIDAD_FISICA_ID, "nombre": f"Unidad #{UNIDAD_FISICA_ID}"},
+        "prestamo_activo": obtener_prestamo_activo(UNIDAD_FISICA_ID),
+        "pendientes": pendientes,
+        "duracion_prestamo_seg": GUEST_TTL_SECONDS
+    }
+
+
+def _solicitud_pendiente(id_solicitud: int) -> Dict[str, Any]:
+    _expirar_solicitudes_pendientes()
+    filas = db_manager.execute_query(
+        "SELECT id_solicitud, id_vehiculo, nombre_visitante, estado FROM solicitudes_invitado WHERE id_solicitud = %s LIMIT 1",
+        (id_solicitud,)
+    )
+    if not filas:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Solicitud no encontrada.")
+    if filas[0]["estado"] != "PENDIENTE":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"La solicitud ya está {filas[0]['estado']}.")
+    return filas[0]
+
+
+@router.post("/solicitudes-invitado/{id_solicitud}/aprobar")
+async def aprobar_solicitud_invitado(id_solicitud: int, user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    """
+    Presta el vehículo físico al visitante por 3 minutos con TODOS los comandos y demos de la empresa.
+    Sólo un préstamo a la vez; el propietario queda bloqueado (409) mientras dure.
+    """
+    sol = _solicitud_pendiente(id_solicitud)
+    id_v = int(sol["id_vehiculo"])
+    unidad = db_manager.execute_query("SELECT activo FROM vehiculos WHERE id_vehiculo = %s LIMIT 1", (id_v,))
+    if not unidad or not unidad[0].get("activo"):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El vehículo físico está dado de baja.")
+    ocupada = db_manager.execute_query(
+        """
+        SELECT nombre_operador, TIMESTAMPDIFF(SECOND, NOW(), expira_en) AS seg
+        FROM sesiones_control WHERE id_vehiculo = %s AND activa = 1 AND expira_en > NOW() LIMIT 1
+        """,
+        (id_v,)
+    )
+    if ocupada:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Ya hay un Invitado manejando el vehículo ({ocupada[0]['nombre_operador']}, {max(1, int(ocupada[0]['seg'] or 1))} s restantes). Sólo uno a la vez."
+        )
+
+    # Marcar primero la solicitud (evita aprobar dos veces la misma si dos admins hacen clic)
+    jti = secrets.token_hex(12)
+    marcado = db_manager.execute_write(
+        """
+        UPDATE solicitudes_invitado SET estado = 'APROBADA', resuelta_en = NOW(), id_admin = %s, token_jti = %s
+        WHERE id_solicitud = %s AND estado = 'PENDIENTE'
+        """,
+        (user["id_usuario"], jti, id_solicitud)
+    )
+    if not marcado.get("rowcount"):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="La solicitud ya fue atendida.")
+
+    # El vehículo cambia de operador: se detiene lo que estuviera haciendo el dueño
+    await _detener_unidad(id_v)
+
+    sesion = db_manager.execute_write(
+        """
+        INSERT INTO sesiones_control (id_vehiculo, id_usuario, token_jti, nombre_operador, tipo_sesion, inicio_en, expira_en, activa)
+        VALUES (%s, NULL, %s, %s, %s, NOW(), DATE_ADD(NOW(), INTERVAL %s SECOND), 1)
+        """,
+        (id_v, jti, sol["nombre_visitante"], TIPO_PRESTAMO_FISICO, GUEST_TTL_SECONDS)
+    )
+    db_manager.execute_write(
+        "UPDATE solicitudes_invitado SET id_sesion = %s WHERE id_solicitud = %s",
+        (sesion.get("lastrowid"), id_solicitud)
+    )
+    registrar_auditoria(
+        user["id_usuario"], "ADMIN", "APROBACION_PRESTAMO", "solicitudes_invitado", id_solicitud,
+        f"Vehículo físico #{id_v} prestado a '{sol['nombre_visitante']}' por {GUEST_TTL_SECONDS} s"
+    )
+    return {"mensaje": f"Préstamo aprobado: '{sol['nombre_visitante']}' puede manejar la unidad #{id_v} por {GUEST_TTL_SECONDS // 60} minutos."}
+
+
+@router.post("/solicitudes-invitado/{id_solicitud}/rechazar")
+def rechazar_solicitud_invitado(id_solicitud: int, user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    sol = _solicitud_pendiente(id_solicitud)
+    db_manager.execute_write(
+        """
+        UPDATE solicitudes_invitado SET estado = 'RECHAZADA', resuelta_en = NOW(), id_admin = %s
+        WHERE id_solicitud = %s AND estado = 'PENDIENTE'
+        """,
+        (user["id_usuario"], id_solicitud)
+    )
+    registrar_auditoria(
+        user["id_usuario"], "ADMIN", "RECHAZO_PRESTAMO", "solicitudes_invitado", id_solicitud,
+        f"Solicitud de '{sol['nombre_visitante']}' rechazada"
+    )
+    return {"mensaje": f"Solicitud de '{sol['nombre_visitante']}' rechazada."}
+
+
+@router.post("/prestamo-fisico/terminar")
+async def terminar_prestamo_fisico(user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    """El Admin corta el préstamo en curso: el vehículo se detiene y el token del Invitado deja de servir."""
+    prestamo = obtener_prestamo_activo(UNIDAD_FISICA_ID)
+    if not prestamo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No hay ningún préstamo en curso.")
+    db_manager.execute_write("UPDATE sesiones_control SET activa = 0 WHERE id_sesion = %s", (prestamo["id_sesion"],))
+    db_manager.execute_write(
+        "UPDATE solicitudes_invitado SET estado = 'FINALIZADA' WHERE id_sesion = %s AND estado = 'APROBADA'",
+        (prestamo["id_sesion"],)
+    )
+    await _detener_unidad(int(prestamo["id_vehiculo"]))
+    from app.websocket.manager import ws_manager
+    await ws_manager.broadcast_json({"tipo_evento": "sesion_invitado_expirada", "vehiculo": int(prestamo["id_vehiculo"])})
+    registrar_auditoria(
+        user["id_usuario"], "ADMIN", "FIN_PRESTAMO_ADMIN", "sesiones_control", prestamo["id_vehiculo"],
+        f"Préstamo de '{prestamo['nombre_operador']}' terminado por el Administrador: unidad detenida"
+    )
+    return {"mensaje": "Préstamo terminado y vehículo detenido."}

@@ -29,6 +29,15 @@ GUEST_TTL_SECONDS = 60 * 3           # 3 minutos para sesión temporal de Invita
 # Comandos que puede usar un Invitado en la unidad de exhibición (lista reducida y segura)
 COMANDOS_INVITADO = {"AVANZAR", "RETROCEDER", "GIRAR_IZQUIERDA", "GIRAR_DERECHA", "LUZ", "SONIDO", "DETENER"}
 
+# Préstamo del vehículo físico a un Invitado aprobado por el Administrador.
+# UNIDAD_FISICA_ID es la unidad cuyo ESP32 está conectado (el carrito real escucha /ws/<id>).
+# Durante el préstamo el Invitado usa TODOS los comandos y demos de la empresa, y el propietario
+# queda bloqueado hasta que termine. Sólo hay un préstamo a la vez.
+TIPO_PRESTAMO_FISICO = "PRESTAMO_FISICO"
+UNIDAD_FISICA_ID = int(os.getenv("UNIDAD_FISICA_ID", "1") or 1)
+SOLICITUD_PENDIENTE_TTL_SECONDS = 60 * 5   # una solicitud sin respuesta caduca a los 5 minutos
+MAX_SOLICITUDES_PENDIENTES = 10
+
 # Límite de intentos de inicio de sesión (por correo + IP)
 LOGIN_MAX_INTENTOS = 5
 LOGIN_VENTANA_SEG = 5 * 60
@@ -239,7 +248,7 @@ def get_current_user_optional(
         try:
             sesiones = db_manager.execute_query(
                 """
-                SELECT id_sesion, id_vehiculo, expira_en, activa,
+                SELECT id_sesion, id_vehiculo, expira_en, activa, tipo_sesion,
                        TIMESTAMPDIFF(SECOND, NOW(), expira_en) AS segundos_restantes
                 FROM sesiones_control
                 WHERE token_jti = %s LIMIT 1
@@ -253,6 +262,8 @@ def get_current_user_optional(
                 )
             payload["id_vehiculo_reservado"] = sesiones[0]["id_vehiculo"]
             payload["segundos_restantes"] = max(0, int(sesiones[0]["segundos_restantes"]))
+            # El tipo de sesión sale de la BD (no del token), así nadie puede "fabricarse" un préstamo
+            payload["tipo_sesion"] = sesiones[0].get("tipo_sesion") or "INVITADO"
         except HTTPException:
             raise
         except Exception:
@@ -271,6 +282,45 @@ def get_current_user(
             detail="Autenticación requerida. Inicia sesión para continuar."
         )
     return user
+
+
+def es_prestamo_fisico(user: Optional[Dict[str, Any]]) -> bool:
+    """True si el usuario es un Invitado con préstamo del vehículo físico aprobado por el Admin."""
+    return bool(user) and user.get("rol") == "INVITADO" and user.get("tipo_sesion") == TIPO_PRESTAMO_FISICO
+
+
+def obtener_prestamo_activo(id_vehiculo: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Devuelve el préstamo físico vigente (de la unidad indicada o de cualquiera) o None."""
+    sql = """
+        SELECT s.id_sesion, s.id_vehiculo, s.nombre_operador, s.token_jti, s.inicio_en, s.expira_en,
+               TIMESTAMPDIFF(SECOND, NOW(), s.expira_en) AS segundos_restantes
+        FROM sesiones_control s
+        WHERE s.activa = 1 AND s.expira_en > NOW() AND s.tipo_sesion = %s
+    """
+    params: tuple = (TIPO_PRESTAMO_FISICO,)
+    if id_vehiculo is not None:
+        sql += " AND s.id_vehiculo = %s"
+        params += (id_vehiculo,)
+    filas = db_manager.execute_query(sql + " ORDER BY s.id_sesion DESC LIMIT 1", params)
+    return filas[0] if filas else None
+
+
+def _bloquear_si_prestada(id_vehiculo: int, id_usuario: Optional[int], rol: str) -> None:
+    """Mientras un Invitado tiene el vehículo físico prestado, nadie más lo opera (ni su dueño)."""
+    try:
+        prestamo = obtener_prestamo_activo(id_vehiculo)
+    except Exception:
+        return
+    if prestamo:
+        seg = max(1, int(prestamo.get("segundos_restantes") or 1))
+        registrar_auditoria(
+            id_usuario, rol, "CONTROL_BLOQUEADO_PRESTAMO", "vehiculos", id_vehiculo,
+            f"La unidad #{id_vehiculo} está prestada a '{prestamo.get('nombre_operador')}' ({seg} s restantes)"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"La unidad #{id_vehiculo} está prestada a un Invitado ({prestamo.get('nombre_operador')}). Vuelve a intentarlo en {seg} s."
+        )
 
 
 def require_roles(*allowed_roles: str):
@@ -364,10 +414,21 @@ def verificar_acceso_vehiculo(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Acceso denegado: la unidad #{id_vehiculo} no está asignada a tu cuenta."
             )
+        if modo == "control":
+            _bloquear_si_prestada(id_vehiculo, id_usuario, rol)
         return unidad
 
     # 2. REGLAS PARA ROL INVITADO (CLIENTE POTENCIAL)
     if rol == "INVITADO":
+        # Préstamo del vehículo físico aprobado por el Admin: sólo esa unidad, mientras dure
+        if es_prestamo_fisico(user):
+            id_res = user.get("id_vehiculo_reservado")
+            if id_res and int(id_res) == int(id_vehiculo):
+                return unidad
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Tu préstamo sólo incluye la unidad #{id_res}."
+            )
         if estado_com != "EXHIBICION":
             registrar_auditoria(
                 id_usuario, rol, "INVITADO_UNIDAD_PRIVADA_BLOQUEADO", "vehiculos", id_vehiculo,
@@ -398,6 +459,8 @@ def verificar_acceso_vehiculo(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Control privado protegido: esta unidad pertenece a un cliente comprador. Solicita al propietario activar 'Autorización de Soporte Técnico' desde Mis Vehículos."
                 )
+        if modo == "control":
+            _bloquear_si_prestada(id_vehiculo, id_usuario, rol)
         return unidad
 
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Rol no autorizado")
@@ -422,7 +485,10 @@ def ids_unidades_visibles(user: Optional[Dict[str, Any]]) -> Optional[set]:
         filas = db_manager.execute_query(
             "SELECT id_vehiculo FROM vehiculos WHERE activo = 1 AND estado_comercial = 'EXHIBICION'"
         )
-    return {int(f["id_vehiculo"]) for f in filas}
+    visibles = {int(f["id_vehiculo"]) for f in filas}
+    if es_prestamo_fisico(user) and user.get("id_vehiculo_reservado"):
+        visibles = {int(user["id_vehiculo_reservado"])}
+    return visibles
 
 
 def obtener_demo(id_demo: int) -> Dict[str, Any]:

@@ -13,6 +13,10 @@ class GuestSessionRequest(BaseModel):
     id_vehiculo: Optional[int] = None
 
 
+class SolicitudPrestamoRequest(BaseModel):
+    nombre_visitante: str = Field("Visitante", min_length=1, max_length=80)
+
+
 class ModeloCatalogoCreate(BaseModel):
     codigo_modelo: str = Field(..., max_length=40)
     nombre: str = Field(..., max_length=80)

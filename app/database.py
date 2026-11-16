@@ -207,6 +207,31 @@ class DatabaseManager:
                 """)
                 cur.execute("DELETE FROM tokens_revocados WHERE expira_en < NOW() - INTERVAL 1 DAY")
 
+                # V003: solicitudes de Invitado para manejar el vehículo físico (aprobación del Admin)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS solicitudes_invitado (
+                        id_solicitud INT AUTO_INCREMENT PRIMARY KEY,
+                        id_vehiculo INT NOT NULL,
+                        nombre_visitante VARCHAR(100) NOT NULL,
+                        codigo_hash CHAR(64) NOT NULL,
+                        estado VARCHAR(20) NOT NULL DEFAULT 'PENDIENTE'
+                            COMMENT 'PENDIENTE | APROBADA | RECHAZADA | CANCELADA | EXPIRADA | FINALIZADA',
+                        ip_origen VARCHAR(64) NULL,
+                        creada_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        resuelta_en DATETIME NULL,
+                        id_admin INT NULL,
+                        id_sesion INT NULL,
+                        token_jti VARCHAR(80) NULL,
+                        token_entregado TINYINT(1) NOT NULL DEFAULT 0,
+                        UNIQUE KEY uq_solicitud_codigo (codigo_hash),
+                        INDEX idx_solicitud_estado (estado, creada_en),
+                        CONSTRAINT fk_solicitud_vehiculo FOREIGN KEY (id_vehiculo) REFERENCES vehiculos(id_vehiculo)
+                            ON UPDATE CASCADE ON DELETE CASCADE,
+                        CONSTRAINT fk_solicitud_admin FOREIGN KEY (id_admin) REFERENCES usuarios(id_usuario)
+                            ON UPDATE CASCADE ON DELETE SET NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """)
+
                 # Datos semilla idempotentes
                 cur.execute("""
                     INSERT INTO roles (id_rol, codigo, nombre, descripcion) VALUES

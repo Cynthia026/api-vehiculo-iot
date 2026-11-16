@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, Request
 from fastapi.encoders import jsonable_encoder
 from typing import Dict, Any, Optional
 from app.database import db_manager
-from app.schemas.administracion import LoginRequest, GuestSessionRequest
+from app.schemas.administracion import LoginRequest, GuestSessionRequest, SolicitudPrestamoRequest
 from app.security import (
     verify_password,
     create_access_token,
@@ -16,8 +16,14 @@ from app.security import (
     limpiar_fallos_login,
     revocar_token,
     TOKEN_TTL_SECONDS,
-    GUEST_TTL_SECONDS
+    GUEST_TTL_SECONDS,
+    TIPO_PRESTAMO_FISICO,
+    UNIDAD_FISICA_ID,
+    SOLICITUD_PENDIENTE_TTL_SECONDS,
+    MAX_SOLICITUDES_PENDIENTES,
+    obtener_prestamo_activo
 )
+import hashlib
 from app.services.telemetria_service import telemetria_service
 from app.schemas.estado import EstadoVehiculoUpdate
 from app.websocket.manager import ws_manager
@@ -25,7 +31,7 @@ from app.websocket.manager import ws_manager
 router = APIRouter(prefix="/api/auth", tags=["Autenticación y Sesiones (4.3)"])
 
 
-def _obtener_unidades_permitidas(id_usuario: int, rol: str):
+def _obtener_unidades_permitidas(id_usuario: int, rol: str, id_reservado: Optional[int] = None):
     """Obtiene la lista de unidades físicas visibles según el rol y propietario."""
     if rol == "ADMIN":
         return db_manager.execute_query(
@@ -58,6 +64,18 @@ def _obtener_unidades_permitidas(id_usuario: int, rol: str):
             ORDER BY v.id_vehiculo
             """,
             (id_usuario,)
+        )
+    # INVITADO con sesión: sólo la unidad que tiene reservada (exhibición o préstamo físico)
+    if id_reservado:
+        return db_manager.execute_query(
+            """
+            SELECT v.id_vehiculo, v.nombre, v.modelo, v.microcontrolador, v.activo,
+                   COALESCE(v.numero_serie, CONCAT('SN-00', v.id_vehiculo)) AS numero_serie,
+                   COALESCE(v.estado_comercial, 'EXHIBICION') AS estado_comercial
+            FROM vehiculos v
+            WHERE v.activo = 1 AND v.id_vehiculo = %s
+            """,
+            (id_reservado,)
         )
     # INVITADO: sólo unidades en estado EXHIBICION
     return db_manager.execute_query(
@@ -250,7 +268,7 @@ def iniciar_sesion_invitado(datos: GuestSessionRequest, request: Request):
 @router.get("/me")
 def obtener_perfil_actual(user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve la sesión vigente, rol, unidades permitidas y segundos restantes si es Invitado."""
-    unidades = _obtener_unidades_permitidas(user.get("id_usuario"), user.get("rol"))
+    unidades = _obtener_unidades_permitidas(user.get("id_usuario"), user.get("rol"), user.get("id_vehiculo_reservado"))
     return {
         "usuario": {
             "id_usuario": user.get("id_usuario"),
@@ -258,7 +276,8 @@ def obtener_perfil_actual(user: Dict[str, Any] = Depends(get_current_user)):
             "email": user.get("email"),
             "rol": user.get("rol"),
             "id_vehiculo_reservado": user.get("id_vehiculo_reservado"),
-            "segundos_restantes": user.get("segundos_restantes")
+            "segundos_restantes": user.get("segundos_restantes"),
+            "tipo_sesion": user.get("tipo_sesion")
         },
         "unidades": unidades
     }
@@ -281,9 +300,23 @@ async def cerrar_sesion(user: Dict[str, Any] = Depends(get_current_user)):
             "UPDATE sesiones_control SET activa = 0 WHERE token_jti = %s",
             (jti,)
         )
+        try:
+            db_manager.execute_write(
+                "UPDATE solicitudes_invitado SET estado = 'FINALIZADA' WHERE token_jti = %s AND estado = 'APROBADA'",
+                (jti,)
+            )
+        except Exception:
+            pass
 
     # Si un invitado cierra sesión o expira su prueba, detenemos físicamente la unidad de exhibición
     if user.get("rol") == "INVITADO" and id_res:
+        try:
+            from app.routers.demos import active_demo_tasks
+            tarea = active_demo_tasks.pop(int(id_res), None)
+            if tarea:
+                tarea.cancel()
+        except Exception:
+            pass
         try:
             cmds = db_manager.execute_query(
                 "SELECT id_comando FROM comandos WHERE id_vehiculo = %s AND LOWER(nombre) = 'detener' LIMIT 1",
@@ -302,3 +335,160 @@ async def cerrar_sesion(user: Dict[str, Any] = Depends(get_current_user)):
         f"Cierre de sesión de {user.get('nombre')}"
     )
     return {"mensaje": "Sesión cerrada correctamente"}
+
+
+# ---------------------------------------------------------------------------------------------
+# PRÉSTAMO DEL VEHÍCULO FÍSICO A UN INVITADO (con aprobación del Administrador)
+# 1) El visitante envía su solicitud y recibe un código secreto de seguimiento.
+# 2) El Administrador la aprueba o rechaza desde su panel.
+# 3) Al aprobarse, el visitante recibe (una sola vez) su token de 3 minutos con TODOS los comandos.
+# ---------------------------------------------------------------------------------------------
+
+def _hash_codigo(codigo: str) -> str:
+    return hashlib.sha256((codigo or "").encode("utf-8")).hexdigest()
+
+
+def _expirar_solicitudes_viejas() -> None:
+    db_manager.execute_write(
+        """
+        UPDATE solicitudes_invitado SET estado = 'EXPIRADA', resuelta_en = NOW()
+        WHERE estado = 'PENDIENTE' AND creada_en <= NOW() - INTERVAL %s SECOND
+        """,
+        (SOLICITUD_PENDIENTE_TTL_SECONDS,)
+    )
+
+
+def _buscar_solicitud(codigo: str) -> Dict[str, Any]:
+    _expirar_solicitudes_viejas()
+    filas = db_manager.execute_query(
+        """
+        SELECT s.id_solicitud, s.id_vehiculo, s.nombre_visitante, s.estado, s.token_jti, s.token_entregado,
+               s.id_sesion, s.creada_en, v.nombre AS nombre_vehiculo,
+               TIMESTAMPDIFF(SECOND, NOW(), sc.expira_en) AS segundos_restantes,
+               sc.activa AS sesion_activa
+        FROM solicitudes_invitado s
+        INNER JOIN vehiculos v ON v.id_vehiculo = s.id_vehiculo
+        LEFT JOIN sesiones_control sc ON sc.id_sesion = s.id_sesion
+        WHERE s.codigo_hash = %s
+        LIMIT 1
+        """,
+        (_hash_codigo(codigo),)
+    )
+    if not filas:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Solicitud no encontrada.")
+    return filas[0]
+
+
+@router.post("/invitado/solicitud", status_code=status.HTTP_201_CREATED)
+def solicitar_prestamo_fisico(datos: SolicitudPrestamoRequest, request: Request):
+    """El visitante pide manejar el vehículo físico. Queda PENDIENTE hasta que el Admin responda."""
+    _expirar_solicitudes_viejas()
+    unidad = db_manager.execute_query(
+        "SELECT id_vehiculo, nombre, activo FROM vehiculos WHERE id_vehiculo = %s LIMIT 1",
+        (UNIDAD_FISICA_ID,)
+    )
+    if not unidad or not unidad[0].get("activo"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="El vehículo físico no está disponible en este momento.")
+
+    prestamo = obtener_prestamo_activo(UNIDAD_FISICA_ID)
+    if prestamo:
+        seg = max(1, int(prestamo.get("segundos_restantes") or 1))
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Otro visitante está manejando el vehículo físico. Intenta de nuevo en {seg} s."
+        )
+
+    pendientes = db_manager.execute_query("SELECT COUNT(*) AS n FROM solicitudes_invitado WHERE estado = 'PENDIENTE'")
+    if pendientes and int(pendientes[0]["n"]) >= MAX_SOLICITUDES_PENDIENTES:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Hay demasiadas solicitudes en espera. Intenta más tarde.")
+
+    nombre = (datos.nombre_visitante or "Visitante").strip() or "Visitante"
+    codigo = secrets.token_urlsafe(24)
+    ip_cliente = request.client.host if request.client else "API"
+    res = db_manager.execute_write(
+        """
+        INSERT INTO solicitudes_invitado (id_vehiculo, nombre_visitante, codigo_hash, estado, ip_origen)
+        VALUES (%s, %s, %s, 'PENDIENTE', %s)
+        """,
+        (UNIDAD_FISICA_ID, nombre, _hash_codigo(codigo), ip_cliente)
+    )
+    registrar_auditoria(
+        None, "INVITADO", "SOLICITUD_PRESTAMO", "solicitudes_invitado", res.get("lastrowid"),
+        f"'{nombre}' solicitó manejar el vehículo físico (unidad #{UNIDAD_FISICA_ID})", ip_cliente
+    )
+    return {
+        "id_solicitud": res.get("lastrowid"),
+        "codigo": codigo,
+        "estado": "PENDIENTE",
+        "nombre_vehiculo": unidad[0]["nombre"],
+        "espera_max_seg": SOLICITUD_PENDIENTE_TTL_SECONDS
+    }
+
+
+@router.get("/invitado/solicitud/{codigo}")
+def consultar_solicitud(codigo: str):
+    """
+    El visitante consulta su solicitud. Cuando el Admin la aprueba, la PRIMERA consulta entrega
+    el token de 3 minutos; las siguientes ya no lo vuelven a entregar.
+    """
+    sol = _buscar_solicitud(codigo)
+    estado = sol["estado"]
+    if estado != "APROBADA":
+        return {"estado": estado, "nombre_vehiculo": sol["nombre_vehiculo"]}
+
+    if not sol.get("sesion_activa") or int(sol.get("segundos_restantes") or 0) <= 0:
+        return {"estado": "FINALIZADA", "nombre_vehiculo": sol["nombre_vehiculo"]}
+
+    marcado = db_manager.execute_write(
+        "UPDATE solicitudes_invitado SET token_entregado = 1 WHERE id_solicitud = %s AND token_entregado = 0",
+        (sol["id_solicitud"],)
+    )
+    if not marcado.get("rowcount"):
+        return {"estado": "APROBADA", "token_entregado": True, "nombre_vehiculo": sol["nombre_vehiculo"],
+                "detalle": "El acceso ya se entregó a este navegador."}
+
+    seg = int(sol["segundos_restantes"])
+    token = create_access_token(
+        {
+            "id_usuario": None,
+            "nombre": sol["nombre_visitante"],
+            "email": "invitado@vehiculoiot.com",
+            "rol": "INVITADO",
+            "id_vehiculo_reservado": sol["id_vehiculo"],
+            "jti": sol["token_jti"]
+        },
+        expires_sec=seg
+    )
+    return {
+        "estado": "APROBADA",
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": seg,
+        "usuario": {
+            "id_usuario": None,
+            "nombre": sol["nombre_visitante"],
+            "email": "invitado@vehiculoiot.com",
+            "rol": "INVITADO",
+            "nombre_rol": "Invitado (Vehículo físico)",
+            "tipo_sesion": TIPO_PRESTAMO_FISICO
+        },
+        "reserva": {
+            "id_vehiculo": sol["id_vehiculo"],
+            "nombre_vehiculo": sol["nombre_vehiculo"],
+            "segundos_restantes": seg,
+            "tipo_sesion": TIPO_PRESTAMO_FISICO
+        }
+    }
+
+
+@router.delete("/invitado/solicitud/{codigo}")
+def cancelar_solicitud(codigo: str):
+    """El visitante retira su solicitud mientras sigue PENDIENTE."""
+    sol = _buscar_solicitud(codigo)
+    if sol["estado"] != "PENDIENTE":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"La solicitud ya está {sol['estado']}.")
+    db_manager.execute_write(
+        "UPDATE solicitudes_invitado SET estado = 'CANCELADA', resuelta_en = NOW() WHERE id_solicitud = %s AND estado = 'PENDIENTE'",
+        (sol["id_solicitud"],)
+    )
+    return {"estado": "CANCELADA"}

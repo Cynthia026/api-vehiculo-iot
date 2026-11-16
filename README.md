@@ -121,6 +121,42 @@ Se emite cuando la secuencia termina todos sus pasos de manera natural.
 ¹ Invitado: `AVANZAR, RETROCEDER, GIRAR_IZQUIERDA, GIRAR_DERECHA, LUZ, SONIDO, DETENER`. Reserva **exclusiva** (una segunda sesión sobre la misma unidad recibe `409`). Al vencer, un vigilante en el servidor cierra la sesión y **envía DETENER** aunque el visitante haya cerrado la página.
 ² El comprador concede soporte temporal desde *Mis vehículos* (`PATCH /api/mis-vehiculos/{id}/soporte`).
 
+### 3.1.1 Préstamo del vehículo físico a un Invitado (con aprobación del Admin)
+
+El carrito real es la unidad `UNIDAD_FISICA_ID` (por defecto `1`, la que escucha el ESP32 en `/api/demos/ws/1`). Un visitante puede pedir manejarlo:
+
+```mermaid
+sequenceDiagram
+    participant V as Visitante (Invitado)
+    participant API as FastAPI
+    participant A as Administrador
+    V->>API: POST /api/auth/invitado/solicitud {nombre}
+    API-->>V: 201 {codigo secreto, estado: PENDIENTE}
+    loop cada 3 s
+        V->>API: GET /api/auth/invitado/solicitud/{codigo}
+    end
+    A->>API: GET /api/admin/solicitudes-invitado
+    A->>API: POST /api/admin/solicitudes-invitado/{id}/aprobar
+    API->>API: DETENER la unidad y crear sesión PRESTAMO_FISICO (3 min)
+    V->>API: GET /api/auth/invitado/solicitud/{codigo}
+    API-->>V: 200 {access_token} (sólo una vez)
+    V->>API: Comandos y demos de la unidad física
+    API->>API: Vigilante: a los 3 min DETENER y cerrar
+```
+
+| Regla | Respuesta |
+| :--- | :--- |
+| Sólo **un** préstamo a la vez: con el carrito prestado no se aceptan solicitudes ni aprobaciones | `409` |
+| El Invitado aprobado usa **todos** los comandos y las demos de la empresa, sólo de esa unidad | `200` / `403` en otra unidad |
+| No ve ni ejecuta las demos **privadas** del dueño | `403` |
+| Durante el préstamo, el dueño (y el Admin) no pueden operar la unidad | `409` + auditoría `CONTROL_BLOQUEADO_PRESTAMO` |
+| Al aprobar se cancela la demo del dueño y se envía `DETENER` | — |
+| A los 3 min (o con *Terminar préstamo*) se envía `DETENER` y el token deja de servir | `401` |
+| El token se entrega **una sola vez**; el código de seguimiento se guarda como hash SHA-256 | — |
+| Solicitudes sin respuesta caducan a los 5 min (`EXPIRADA`); el visitante puede cancelar la suya | — |
+
+Auditoría: `SOLICITUD_PRESTAMO`, `APROBACION_PRESTAMO`, `RECHAZO_PRESTAMO`, `FIN_PRESTAMO_ADMIN`, `EXPIRACION_INVITADO`, `CONTROL_BLOQUEADO_PRESTAMO`.
+
 Otras reglas:
 - **Sesión:** JWT HS256 (8 h Admin/Usuario, 3 min Invitado). `POST /api/auth/logout` **invalida** el token (`tokens_revocados`); una cuenta desactivada pierde el acceso de inmediato.
 - **Límite de intentos:** 5 contraseñas incorrectas por correo+IP en 5 min → `429` durante 5 min. Cada fallo queda en la bitácora (`LOGIN_FALLIDO`).
@@ -134,6 +170,10 @@ Otras reglas:
 | Endpoint | Método | Rol | Descripción |
 | :--- | :--- | :--- | :--- |
 | `/api/auth/login` · `/logout` · `/me` · `/invitado` | POST/GET | — | Sesión JWT y prueba temporal de Invitado |
+| `/api/auth/invitado/solicitud` · `/invitado/solicitud/{codigo}` | POST/GET/DELETE | Público | Pedir el vehículo físico, consultar la respuesta (entrega el token al aprobarse) y cancelar |
+| `/api/admin/solicitudes-invitado` | GET | ADMIN | Solicitudes en espera y préstamo en curso |
+| `/api/admin/solicitudes-invitado/{id}/aprobar` · `/rechazar` | POST | ADMIN | Prestar 3 min el vehículo físico o rechazar |
+| `/api/admin/prestamo-fisico/terminar` | POST | ADMIN | Cortar el préstamo en curso y detener la unidad |
 | `/api/admin/dashboard` | GET | ADMIN | Métricas reales, inventario, modelos, clientes, sesiones y bitácora |
 | `/api/admin/modelos` · `/modelos/{id}` | GET/POST/PUT | ADMIN | Catálogo comercial (editar o desactivar con `PUT`) |
 | `/api/admin/unidades` · `/unidades/{id}` | POST/PUT | ADMIN | Alta y edición de unidades físicas |
@@ -148,7 +188,7 @@ Otras reglas:
 
 ## 4. Modelo de datos (diagrama entidad-relación)
 
-Tablas de 4.1/4.2 (conservadas) y de 4.3 (agregadas por las migraciones `V001` y `V002`).
+Tablas de 4.1/4.2 (conservadas) y de 4.3 (agregadas por las migraciones `V001`, `V002` y `V003`).
 
 ```mermaid
 erDiagram
@@ -167,6 +207,9 @@ erDiagram
     comandos ||--o{ demo_movimientos : "comando del paso"
     vehiculos ||--o{ sesiones_control : "reservas de invitado"
     usuarios ||--o{ bitacora_auditoria : "actor"
+    vehiculos ||--o{ solicitudes_invitado : "préstamo físico"
+    usuarios ||--o{ solicitudes_invitado : "admin que responde"
+    solicitudes_invitado |o--o| sesiones_control : "sesión aprobada"
 
     roles { int id_rol PK  varchar codigo UK }
     usuarios { int id_usuario PK  int id_rol FK  varchar email UK  varchar password_hash  bool activo }
@@ -178,7 +221,8 @@ erDiagram
     historial_movimientos { int id_historial PK  int id_vehiculo FK  int id_comando FK  varchar origen  timestamp fecha_hora }
     demos { int id_demo PK  int id_vehiculo FK  int id_usuario_creador FK  varchar tipo_demo  bool activo }
     demo_movimientos { int id_demo_movimiento PK  int id_demo FK  int id_comando FK  int orden  int duracion_ms  int pausa_ms }
-    sesiones_control { int id_sesion PK  int id_vehiculo FK  varchar token_jti UK  datetime expira_en  bool activa }
+    sesiones_control { int id_sesion PK  int id_vehiculo FK  varchar token_jti UK  varchar tipo_sesion  datetime expira_en  bool activa }
+    solicitudes_invitado { int id_solicitud PK  int id_vehiculo FK  char codigo_hash UK  varchar estado  int id_admin FK  int id_sesion  bool token_entregado }
     bitacora_auditoria { bigint id_auditoria PK  int id_usuario FK  varchar accion  varchar detalle  timestamp fecha_hora }
     tokens_revocados { varchar jti PK  datetime expira_en }
 ```
@@ -200,10 +244,11 @@ erDiagram
 3. **Aplicar** en este orden (primero en una base de prueba restaurada del respaldo):
    - `V001__4_3_administracion_up.sql` — roles, usuarios, modelos, asignaciones, sesiones, auditoría y columnas aditivas.
    - `V002__seguridad_sesiones_up.sql` — tabla `tokens_revocados` y estado `INACTIVO` (baja lógica).
+   - `V003__prestamo_fisico_invitado_up.sql` — tabla `solicitudes_invitado` (préstamo del vehículo físico).
 4. **Verificación posterior:** `migrations/02_postcheck_validation.sql` (los conteos de `vehiculos`, `comandos`, `historial_movimientos`, `demos` y `demo_movimientos` deben coincidir con el paso 1).
-5. **Reversión** (sólo prueba): `V002__..._down.sql` y luego `V001__..._down.sql`; o restaurar el respaldo con `mysql ... vehiculo_iot < respaldo.sql`.
+5. **Reversión** (sólo prueba): `V003__..._down.sql`, `V002__..._down.sql` y luego `V001__..._down.sql`; o restaurar el respaldo con `mysql ... vehiculo_iot < respaldo.sql`.
 
-El servidor también aplica de forma **idempotente y no destructiva** los cambios de V001/V002 al arrancar (`database.ensure_schema_4_3`): sólo crea lo que falta, nunca borra datos ni reasigna unidades.
+El servidor también aplica de forma **idempotente y no destructiva** los cambios de V001/V002/V003 al arrancar (`database.ensure_schema_4_3`): sólo crea lo que falta, nunca borra datos ni reasigna unidades.
 
 ---
 
@@ -217,11 +262,13 @@ Copia `.env.example` a `.env` **sólo en el servidor** (`.env` está en `.gitign
 | `JWT_SECRET` | ✅ | Clave de firma de sesiones (≥ 32 caracteres). Genérala con `python3 -c "import secrets; print(secrets.token_urlsafe(48))"` |
 | `SEED_ADMIN_PASSWORD`, `SEED_CYNTHIA_PASSWORD`, `SEED_CARLOS_PASSWORD`, `SEED_INVITADO_PASSWORD` | Opcional | Contraseñas de las cuentas de demostración. Si se definen, se **rotan** al reiniciar; si no, nunca se sobrescriben. |
 
+| `UNIDAD_FISICA_ID` | Opcional | Unidad del carrito real que se presta a los Invitados aprobados (por defecto `1`) |
+
 Las contraseñas de ejemplo que aparecen en `V001` quedaron **obsoletas**: rótalas con las variables `SEED_*` y reinicia la API.
 
 ---
 
-## 7. Matriz de pruebas (P01–P17)
+## 7. Matriz de pruebas (P01–P20)
 
 Ejecutar sobre la plataforma publicada con las cuentas de cada rol. La columna *Resultado* la llena cada evaluador.
 
@@ -244,5 +291,8 @@ Ejecutar sobre la plataforma publicada con las cuentas de cada rol. La columna *
 | P15 | Reconexión | Todos | Cortar Wi-Fi y reconectar | WSS se reconecta y reconcilia por REST | |
 | P16 | Responsive | Todos | Celular vertical/horizontal | Todo usable sin desplazamiento horizontal | |
 | P17 | Auditoría | ADMIN | Revisar bitácora | Eventos de todas las pruebas anteriores | |
+| P18 | Solicitud de vehículo físico | — | Administración → *Pedir el vehículo físico* | 201, "Esperando aprobación" | |
+| P19 | Aprobación y control total | ADMIN + INVITADO | Admin aprueba; el visitante mueve el carrito con todos los comandos y la demo | 200; la dueña recibe 409 mientras dura; una 2ª aprobación → 409 | |
+| P20 | Fin del préstamo | INVITADO | Esperar 3 min o *Terminar préstamo* | El carrito se detiene, token → 401, auditoría | |
 
-**Pruebas automáticas:** `tests/test_seguridad.py` ejecuta 61 verificaciones de estas reglas contra una base MySQL **local de prueba** (nunca contra RDS de producción). Ver `tests/README.md`.
+**Pruebas automáticas:** `tests/test_seguridad.py` ejecuta 92 verificaciones de estas reglas contra una base MySQL **local de prueba** (nunca contra RDS de producción). Ver `tests/README.md`.

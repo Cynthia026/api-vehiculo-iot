@@ -6,7 +6,7 @@ from app.schemas.historial import HistorialCreate, HistorialResponse
 from app.services.telemetria_service import telemetria_service
 from app.services.historial_service import historial_service
 from app.websocket.manager import ws_manager
-from app.security import get_current_user_optional, verificar_acceso_vehiculo, registrar_auditoria, COMANDOS_INVITADO
+from app.security import get_current_user_optional, verificar_acceso_vehiculo, registrar_auditoria, COMANDOS_INVITADO, es_prestamo_fisico
 from app.database import db_manager
 
 router = APIRouter(prefix="/api/telemetria", tags=["Telemetría y Estado"])
@@ -53,7 +53,9 @@ async def ejecutar_movimiento_individual(
             status_code=422,
             detail=f"El comando {id_comando} no pertenece a la unidad #{id_vehiculo}."
         )
-    if user and user.get("rol") == "INVITADO" and str(cmds[0].get("nombre", "")).strip().upper() not in COMANDOS_INVITADO:
+    # El Invitado de exhibición tiene comandos básicos; el préstamo físico aprobado por el Admin, todos
+    if (user and user.get("rol") == "INVITADO" and not es_prestamo_fisico(user)
+            and str(cmds[0].get("nombre", "")).strip().upper() not in COMANDOS_INVITADO):
         registrar_auditoria(
             user.get("id_usuario"), "INVITADO", "COMANDO_INVITADO_BLOQUEADO", "comandos", id_vehiculo,
             f"Invitado intentó usar '{cmds[0].get('nombre')}' en la unidad #{id_vehiculo}"

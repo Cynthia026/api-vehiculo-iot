@@ -53,15 +53,18 @@ def obtener_mis_vehiculos(user: Dict[str, Any] = Depends(get_current_user)):
             SELECT v.id_vehiculo, v.nombre, v.modelo, v.descripcion, v.microcontrolador,
                    COALESCE(v.numero_serie, CONCAT('SN-00', v.id_vehiculo)) AS numero_serie,
                    v.estado_comercial,
+                   s.tipo_sesion,
                    ev.conectado,
                    c.nombre AS ultimo_comando,
                    ev.fecha_actualizacion
             FROM vehiculos v
             LEFT JOIN estado_vehiculo ev ON ev.id_vehiculo = v.id_vehiculo
             LEFT JOIN comandos c ON c.id_comando = ev.id_comando
-            WHERE v.activo = 1 AND v.estado_comercial = 'EXHIBICION'
+            LEFT JOIN sesiones_control s ON s.token_jti = %s
+            WHERE v.activo = 1 AND v.id_vehiculo = %s
             ORDER BY v.id_vehiculo
-            """
+            """,
+            (user.get("jti") or "", user.get("id_vehiculo_reservado") or 0)
         )
 
     # ADMIN

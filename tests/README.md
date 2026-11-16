@@ -1,8 +1,8 @@
 # Pruebas automáticas de seguridad (Práctica 4.3)
 
-`test_seguridad.py` levanta la API con `TestClient` y comprueba **61 reglas** contra una base MySQL/MariaDB **local**:
+`test_seguridad.py` levanta la API con `TestClient` y comprueba **92 reglas** contra una base MySQL/MariaDB **local**:
 sin sesión, login y límite de intentos, BOLA, privacidad con soporte, propiedad de demos, Invitado (comandos,
-exclusividad y DETENER automático al vencer), CRUD con baja lógica, logout/invalidación, persistencia tras reinicio y WebSocket.
+exclusividad y DETENER automático al vencer), préstamo del vehículo físico con aprobación del Admin, CRUD con baja lógica, logout/invalidación, persistencia tras reinicio y WebSocket.
 
 > ⚠️ Nunca contra RDS de producción: crea datos, desactiva cuentas y rota contraseñas. El script se niega a correr si `DB_HOST` no es local.
 

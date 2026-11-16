@@ -15,7 +15,8 @@ from app.security import (
     verificar_lectura_demo,
     verificar_edicion_demo,
     obtener_demo,
-    COMANDOS_INVITADO
+    COMANDOS_INVITADO,
+    es_prestamo_fisico
 )
 from app.database import db_manager
 
@@ -147,6 +148,9 @@ def listar_demos_vehiculo(
                 "nombre_creador": info.get("nombre_creador") or "Empresa IoT"
             }
             # Si es un USUARIO comprador, ve demos de EMPRESA y sus propias demos PRIVADAS
+            # Un Invitado (incluso con préstamo de una unidad vendida) nunca ve demos privadas del dueño
+            if user and user.get("rol") == "INVITADO" and item["tipo_demo"] == "PRIVADA":
+                continue
             if user and user.get("rol") == "USUARIO":
                 if item["tipo_demo"] == "PRIVADA" and item["id_usuario_creador"] not in (None, user.get("id_usuario")):
                     continue
@@ -327,8 +331,9 @@ async def iniciar_ejecucion_demo(
     demo_info = verificar_lectura_demo(id_demo, user)
     if int(demo_info["id_vehiculo"]) != int(id_vehiculo):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta demo pertenece a otra unidad.")
-    if user.get("rol") == "INVITADO":
-        # El Invitado sólo ejecuta demos cuyos pasos usen comandos permitidos para él
+    if user.get("rol") == "INVITADO" and not es_prestamo_fisico(user):
+        # El Invitado de exhibición sólo ejecuta demos cuyos pasos usen comandos permitidos para él
+        # (con préstamo físico aprobado por el Admin puede ejecutar todas las demos de la empresa)
         pasos = demo_service.obtener_movimientos(id_demo)
         nombres = {int(c["id_comando"]): str(c["nombre"]).strip().upper() for c in db_manager.execute_query(
             "SELECT id_comando, nombre FROM comandos WHERE id_vehiculo = %s", (id_vehiculo,))}

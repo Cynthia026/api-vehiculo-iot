@@ -1,5 +1,5 @@
 """
-Pruebas de seguridad de la Práctica 4.3 (61 verificaciones).
+Pruebas de seguridad de la Práctica 4.3 (92 verificaciones).
 SÓLO contra una base MySQL LOCAL de prueba: el script crea datos, desactiva cuentas y rota contraseñas.
 Uso (desde la raíz del repositorio):  python3 tests/test_seguridad.py
 """
@@ -95,6 +95,54 @@ with TestClient(main.app) as c:
     aud = q("SELECT COUNT(*) n FROM bitacora_auditoria WHERE accion='EXPIRACION_INVITADO'")[0]['n']
     check('Al vencer: sesión cerrada, unidad DETENIDA y auditado (sin que el visitante haga nada)', ses['activa'] == 0 and est['nombre'].upper() == 'DETENER' and aud >= 1, f"{ses} {est} {aud}")
     r = c.post('/api/telemetria/movimiento', params={'id_vehiculo': 2, 'id_comando': cmd_id(2, 'AVANZAR')}, headers=H(tG)); check('Token del Invitado vencido rechazado (401)', r.status_code == 401, r.text)
+
+    print('\n[Préstamo del vehículo físico a un Invitado (aprobación del Admin)]')
+    r = c.post('/api/auth/invitado/solicitud', json={'nombre_visitante': 'Luis'}); check('P18 Invitado solicita el vehículo físico (201, PENDIENTE)', r.status_code == 201 and r.json().get('estado') == 'PENDIENTE', r.text)
+    cod1, id_s1 = r.json().get('codigo'), r.json().get('id_solicitud')
+    r = c.post('/api/auth/invitado/solicitud', json={'nombre_visitante': 'Mara'}); cod2, id_s2 = r.json().get('codigo'), r.json().get('id_solicitud')
+    check('El código de seguimiento se guarda como hash, no en claro', not q("SELECT 1 FROM solicitudes_invitado WHERE codigo_hash=%s", (cod1,)))
+    r = c.get(f'/api/auth/invitado/solicitud/{cod1}'); check('Mientras está PENDIENTE no recibe token', r.json().get('estado') == 'PENDIENTE' and 'access_token' not in r.json(), r.text)
+    r = c.get('/api/auth/invitado/solicitud/codigo-inventado'); check('Código inventado: 404', r.status_code == 404, r.text)
+    r = c.post(f'/api/admin/solicitudes-invitado/{id_s1}/aprobar'); check('Sin sesión NO se aprueba (401)', r.status_code == 401, r.text)
+    r = c.post(f'/api/admin/solicitudes-invitado/{id_s1}/aprobar', headers=H(tU)); check('Un Usuario NO aprueba solicitudes (403)', r.status_code == 403, r.text)
+    r = c.get('/api/admin/solicitudes-invitado', headers=H(tA)); check('Admin ve las 2 solicitudes en espera', r.status_code == 200 and len(r.json().get('pendientes', [])) == 2 and r.json().get('prestamo_activo') is None, r.text)
+    r = c.post(f'/api/admin/solicitudes-invitado/{id_s1}/aprobar', headers=H(tA)); check('P19 Admin aprueba la solicitud (200)', r.status_code == 200, r.text)
+    r = c.post(f'/api/admin/solicitudes-invitado/{id_s1}/aprobar', headers=H(tA)); check('No se aprueba dos veces la misma (409)', r.status_code == 409, r.text)
+    r = c.post(f'/api/admin/solicitudes-invitado/{id_s2}/aprobar', headers=H(tA)); check('Sólo un Invitado a la vez: la 2ª aprobación se rechaza (409)', r.status_code == 409, r.text)
+    r = c.post('/api/auth/invitado/solicitud', json={'nombre_visitante': 'Otro'}); check('Con el vehículo prestado no se aceptan nuevas solicitudes (409)', r.status_code == 409, r.text)
+    r = c.get(f'/api/auth/invitado/solicitud/{cod1}'); tP = r.json().get('access_token')
+    check('Al aprobarse, el visitante recibe su token de 3 min', r.json().get('estado') == 'APROBADA' and tP and 170 <= r.json().get('expires_in', 0) <= 180, r.text)
+    r = c.get(f'/api/auth/invitado/solicitud/{cod1}'); check('El token se entrega UNA sola vez', 'access_token' not in r.json(), r.text)
+    r = c.post('/api/telemetria/movimiento', params={'id_vehiculo': 1, 'id_comando': cmd_id(1, 'SUBIR_BRAZO')}, headers=H(tP)); check('Invitado aprobado mueve el vehículo físico con TODOS los comandos (200)', r.status_code == 200, r.text)
+    r = c.post('/api/telemetria/movimiento', params={'id_vehiculo': 3, 'id_comando': cmd_id(3, 'AVANZAR')}, headers=H(tP)); check('El préstamo sólo cubre la unidad física: NO la de Carlos (403)', r.status_code == 403, r.text)
+    r = c.post('/api/telemetria/movimiento', params={'id_vehiculo': 1, 'id_comando': 1}, headers=H(tU)); check('Durante el préstamo la dueña queda bloqueada (409)', r.status_code == 409, r.text)
+    r = c.get('/api/mis-vehiculos', headers=H(tP)); check('El Invitado sólo ve la unidad prestada', [v['id_vehiculo'] for v in r.json()] == [1], r.text)
+    r = c.get('/api/demos/vehiculo/1', headers=H(tP)); check('El Invitado NO ve las demos privadas de la dueña', r.status_code == 200 and all(d.get('tipo_demo') != 'PRIVADA' for d in r.json()) and r.json(), r.text)
+    r = c.get(f'/api/demos/{id_priv}/movimientos', headers=H(tP)); check('…ni sus pasos (403)', r.status_code == 403, r.text)
+    r = c.post('/api/demos/1/ejecutar', params={'id_vehiculo': 1}, headers=H(tP)); check('Invitado aprobado ejecuta la demo de la empresa (200)', r.status_code == 200, r.text)
+    r = c.get('/api/admin/dashboard', headers=H(tP)); check('Invitado aprobado NO entra a Administración (403)', r.status_code == 403, r.text)
+    r = c.post('/api/admin/prestamo-fisico/terminar', headers=H(tA)); check('Admin termina el préstamo antes de tiempo (200)', r.status_code == 200, r.text)
+    est = q("SELECT c.nombre FROM estado_vehiculo e JOIN comandos c ON c.id_comando=e.id_comando WHERE e.id_vehiculo=1")[0]['nombre']
+    check('Al terminar: vehículo físico DETENIDO y demo cancelada', est.upper() == 'DETENER' and 1 not in __import__('app.routers.demos', fromlist=['x']).active_demo_tasks, est)
+    r = c.post('/api/telemetria/movimiento', params={'id_vehiculo': 1, 'id_comando': 1}, headers=H(tP)); check('El token del Invitado deja de servir (401)', r.status_code == 401, r.text)
+    r = c.post('/api/telemetria/movimiento', params={'id_vehiculo': 1, 'id_comando': 12}, headers=H(tU)); check('La dueña recupera el control (200)', r.status_code == 200, r.text)
+    r = c.post(f'/api/admin/solicitudes-invitado/{id_s2}/rechazar', headers=H(tA)); check('Admin rechaza la otra solicitud (200)', r.status_code == 200, r.text)
+    r = c.get(f'/api/auth/invitado/solicitud/{cod2}'); check('El visitante ve RECHAZADA y no recibe token', r.json().get('estado') == 'RECHAZADA' and 'access_token' not in r.json(), r.text)
+    r = c.post('/api/auth/invitado/solicitud', json={'nombre_visitante': 'Pepe'}); cod3 = r.json().get('codigo')
+    r = c.delete(f'/api/auth/invitado/solicitud/{cod3}'); check('El visitante cancela su solicitud (CANCELADA)', r.status_code == 200 and r.json().get('estado') == 'CANCELADA', r.text)
+    r = c.post('/api/auth/invitado/solicitud', json={'nombre_visitante': 'Olvidado'}); cod4 = r.json().get('codigo')
+    db_manager.execute_write("UPDATE solicitudes_invitado SET creada_en = NOW() - INTERVAL 6 MINUTE WHERE estado='PENDIENTE'")
+    r = c.get(f'/api/auth/invitado/solicitud/{cod4}'); check('Solicitud sin respuesta en 5 min: EXPIRADA', r.json().get('estado') == 'EXPIRADA', r.text)
+    r = c.post('/api/auth/invitado/solicitud', json={'nombre_visitante': 'Ivan'}); cod5, id_s5 = r.json().get('codigo'), r.json().get('id_solicitud')
+    c.post(f'/api/admin/solicitudes-invitado/{id_s5}/aprobar', headers=H(tA))
+    tP2 = c.get(f'/api/auth/invitado/solicitud/{cod5}').json().get('access_token')
+    c.post('/api/telemetria/movimiento', params={'id_vehiculo': 1, 'id_comando': 1}, headers=H(tP2))
+    db_manager.execute_write("UPDATE sesiones_control SET expira_en = NOW() - INTERVAL 1 SECOND WHERE activa = 1 AND tipo_sesion='PRESTAMO_FISICO'")
+    time.sleep(7)
+    est = q("SELECT c.nombre FROM estado_vehiculo e JOIN comandos c ON c.id_comando=e.id_comando WHERE e.id_vehiculo=1")[0]['nombre']
+    sol = q("SELECT estado FROM solicitudes_invitado WHERE id_solicitud=%s", (id_s5,))[0]['estado']
+    check('P20 A los 3 min el vigilante DETIENE el vehículo físico y cierra el préstamo', est.upper() == 'DETENER' and sol == 'FINALIZADA', f'{est} {sol}')
+    r = c.post('/api/telemetria/movimiento', params={'id_vehiculo': 1, 'id_comando': 1}, headers=H(tP2)); check('Token del préstamo vencido rechazado (401)', r.status_code == 401, r.text)
 
     print('\n[Administración: CRUD, baja lógica, historial]')
     r = c.put('/api/admin/modelos/2', json={'nombre': 'Rover Explorador IoT', 'descripcion': 'x', 'microcontrolador_default': 'ESP8266', 'tiene_brazo': False, 'tiene_motores_giro': True, 'activo': False}, headers=H(tA)); check('Admin desactiva un modelo (200)', r.status_code == 200, r.text)
