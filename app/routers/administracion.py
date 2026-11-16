@@ -7,7 +7,10 @@ from app.schemas.administracion import (
     UnidadAdminCreate,
     UnidadAdminUpdate,
     ClienteCreate,
-    AsignacionCreate
+    AsignacionCreate,
+    ModeloCatalogoUpdate,
+    ClienteUpdate,
+    ESTADOS_COMERCIALES
 )
 
 router = APIRouter(prefix="/api/admin", tags=["Administración Comercial (4.3)"])
@@ -146,13 +149,40 @@ def crear_modelo(modelo: ModeloCatalogoCreate, user: Dict[str, Any] = Depends(re
     return creado[0] if creado else {"id_modelo": id_nuevo}
 
 
+@router.put("/modelos/{id_modelo}")
+def actualizar_modelo(id_modelo: int, datos: ModeloCatalogoUpdate, user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    """Edita o desactiva (activo = false) un modelo comercial. No se borra para conservar las unidades asociadas."""
+    existe = db_manager.execute_query("SELECT id_modelo FROM modelos_catalogo WHERE id_modelo = %s", (id_modelo,))
+    if not existe:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Modelo no encontrado")
+    db_manager.execute_write(
+        """
+        UPDATE modelos_catalogo
+        SET nombre = %s, descripcion = %s, microcontrolador_default = %s,
+            tiene_brazo = %s, tiene_motores_giro = %s, activo = %s
+        WHERE id_modelo = %s
+        """,
+        (datos.nombre.strip(), datos.descripcion, datos.microcontrolador_default.strip(),
+         1 if datos.tiene_brazo else 0, 1 if datos.tiene_motores_giro else 0, 1 if datos.activo else 0, id_modelo)
+    )
+    registrar_auditoria(
+        user["id_usuario"], "ADMIN", "EDICION_MODELO" if datos.activo else "DESACTIVACION_MODELO", "modelos_catalogo", id_modelo,
+        f"Modelo #{id_modelo} '{datos.nombre}' actualizado (activo={datos.activo})"
+    )
+    return db_manager.execute_query("SELECT * FROM modelos_catalogo WHERE id_modelo = %s", (id_modelo,))[0]
+
+
 @router.post("/unidades", status_code=status.HTTP_201_CREATED)
 def registrar_unidad_fisica(unidad: UnidadAdminCreate, user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
     """
     Registra una nueva unidad física en `vehiculos`, clona la plantilla de comandos
     del modelo comercial e inicializa su registro en `estado_vehiculo`.
     """
+    if unidad.estado_comercial not in ("DISPONIBLE", "EXHIBICION", "MANTENIMIENTO"):
+        raise HTTPException(status_code=422, detail="Una unidad nueva sólo puede ser DISPONIBLE, EXHIBICION o MANTENIMIENTO (VENDIDO se asigna desde Asignaciones).")
     serie = unidad.numero_serie.strip().upper()
+    if len(serie) < 3:
+        raise HTTPException(status_code=422, detail="El número de serie debe tener al menos 3 caracteres.")
     dup = db_manager.execute_query("SELECT id_vehiculo FROM vehiculos WHERE UPPER(numero_serie) = %s", (serie,))
     if dup:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"El número de serie '{serie}' ya está registrado.")
@@ -161,6 +191,10 @@ def registrar_unidad_fisica(unidad: UnidadAdminCreate, user: Dict[str, Any] = De
     tiene_brazo = True
     if unidad.id_modelo:
         mod = db_manager.execute_query("SELECT * FROM modelos_catalogo WHERE id_modelo = %s", (unidad.id_modelo,))
+        if not mod:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="El modelo comercial no existe.")
+        if not mod[0].get("activo", 1):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El modelo comercial está desactivado.")
         if mod:
             nombre_modelo = mod[0]["nombre"]
             tiene_brazo = bool(mod[0].get("tiene_brazo", 1))
@@ -219,6 +253,30 @@ def actualizar_unidad_fisica(
     datos: UnidadAdminUpdate,
     user: Dict[str, Any] = Depends(require_roles("ADMIN"))
 ):
+    if datos.estado_comercial not in ESTADOS_COMERCIALES:
+        raise HTTPException(status_code=422, detail=f"Estado no válido. Usa: {', '.join(ESTADOS_COMERCIALES)}")
+    actual = db_manager.execute_query(
+        """
+        SELECT v.id_vehiculo, a.id_usuario AS id_propietario FROM vehiculos v
+        LEFT JOIN asignaciones_vehiculo a ON a.id_vehiculo = v.id_vehiculo AND a.activo = 1
+        WHERE v.id_vehiculo = %s LIMIT 1
+        """,
+        (id_vehiculo,)
+    )
+    if not actual:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unidad no encontrada")
+    tiene_dueno = bool(actual[0].get("id_propietario"))
+    if tiene_dueno and (datos.estado_comercial != "VENDIDO" or not datos.activo):
+        raise HTTPException(status_code=409, detail="La unidad tiene comprador: revoca la asignación antes de cambiar su estado o darla de baja.")
+    if not tiene_dueno and datos.estado_comercial == "VENDIDO":
+        raise HTTPException(status_code=409, detail="Para marcarla como VENDIDO asígnala a un comprador.")
+    if datos.numero_serie:
+        dup = db_manager.execute_query(
+            "SELECT id_vehiculo FROM vehiculos WHERE UPPER(numero_serie) = %s AND id_vehiculo <> %s",
+            (datos.numero_serie.strip().upper(), id_vehiculo)
+        )
+        if dup:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese número de serie ya pertenece a otra unidad.")
     db_manager.execute_write(
         """
         UPDATE vehiculos
@@ -292,10 +350,85 @@ def registrar_cliente(cliente: ClienteCreate, user: Dict[str, Any] = Depends(req
     }
 
 
+@router.put("/clientes/{id_usuario}")
+def actualizar_cliente(id_usuario: int, datos: ClienteUpdate, user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
+    """Edita, desactiva (activo = false) o restablece la contraseña de un comprador. Nunca se borra."""
+    cliente = db_manager.execute_query(
+        """
+        SELECT u.id_usuario FROM usuarios u INNER JOIN roles r ON r.id_rol = u.id_rol
+        WHERE u.id_usuario = %s AND r.codigo = 'USUARIO' LIMIT 1
+        """,
+        (id_usuario,)
+    )
+    if not cliente:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cliente comprador no encontrado")
+    email = datos.email.strip().lower()
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=422, detail="Correo electrónico no válido.")
+    dup = db_manager.execute_query(
+        "SELECT id_usuario FROM usuarios WHERE LOWER(email) = %s AND id_usuario <> %s", (email, id_usuario)
+    )
+    if dup:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El correo ya pertenece a otra cuenta.")
+    db_manager.execute_write(
+        "UPDATE usuarios SET nombre = %s, email = %s, activo = %s WHERE id_usuario = %s",
+        (datos.nombre.strip(), email, 1 if datos.activo else 0, id_usuario)
+    )
+    if datos.password:
+        db_manager.execute_write("UPDATE usuarios SET password_hash = %s WHERE id_usuario = %s",
+                                 (hash_password(datos.password), id_usuario))
+    if not datos.activo:
+        # Un comprador desactivado ya no puede autorizar soporte sobre sus unidades
+        db_manager.execute_write(
+            """
+            UPDATE vehiculos v INNER JOIN asignaciones_vehiculo a ON a.id_vehiculo = v.id_vehiculo AND a.activo = 1
+            SET v.soporte_autorizado = 0, v.soporte_expira_en = NULL
+            WHERE a.id_usuario = %s
+            """,
+            (id_usuario,)
+        )
+    registrar_auditoria(
+        user["id_usuario"], "ADMIN", "EDICION_CLIENTE" if datos.activo else "DESACTIVACION_CLIENTE", "usuarios", id_usuario,
+        f"Cliente #{id_usuario} actualizado (activo={datos.activo}{', contraseña restablecida' if datos.password else ''})"
+    )
+    return {"id_usuario": id_usuario, "nombre": datos.nombre.strip(), "email": email, "activo": 1 if datos.activo else 0}
+
+
 @router.post("/asignaciones", status_code=status.HTTP_201_CREATED)
 def asignar_unidad_a_cliente(datos: AsignacionCreate, user: Dict[str, Any] = Depends(require_roles("ADMIN"))):
     """Asigna una unidad física a un cliente comprador y marca la unidad como VENDIDO."""
-    # Desactivar asignaciones previas de esa unidad
+    cliente = db_manager.execute_query(
+        """
+        SELECT u.id_usuario, u.activo FROM usuarios u INNER JOIN roles r ON r.id_rol = u.id_rol
+        WHERE u.id_usuario = %s AND r.codigo = 'USUARIO' LIMIT 1
+        """,
+        (datos.id_usuario,)
+    )
+    if not cliente:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="El cliente comprador no existe.")
+    if not cliente[0].get("activo"):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El cliente está desactivado.")
+    unidad = db_manager.execute_query(
+        """
+        SELECT v.id_vehiculo, v.activo, a.id_usuario AS id_anterior FROM vehiculos v
+        LEFT JOIN asignaciones_vehiculo a ON a.id_vehiculo = v.id_vehiculo AND a.activo = 1
+        WHERE v.id_vehiculo = %s LIMIT 1
+        """,
+        (datos.id_vehiculo,)
+    )
+    if not unidad:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="La unidad no existe.")
+    if not unidad[0].get("activo"):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="La unidad está dada de baja.")
+    sesion = db_manager.execute_query(
+        "SELECT 1 FROM sesiones_control WHERE id_vehiculo = %s AND activa = 1 AND expira_en > NOW() LIMIT 1",
+        (datos.id_vehiculo,)
+    )
+    if sesion:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Un Invitado está usando la unidad en este momento; espera a que termine su prueba.")
+    id_anterior = unidad[0].get("id_anterior")
+
+    # Desactivar asignaciones previas de esa unidad (se conservan como historial: activo = 0)
     db_manager.execute_write(
         "UPDATE asignaciones_vehiculo SET activo = 0 WHERE id_vehiculo = %s AND activo = 1",
         (datos.id_vehiculo,)
@@ -317,6 +450,7 @@ def asignar_unidad_a_cliente(datos: AsignacionCreate, user: Dict[str, Any] = Dep
     registrar_auditoria(
         user["id_usuario"], "ADMIN", "ASIGNACION_UNIDAD", "asignaciones_vehiculo", datos.id_vehiculo,
         f"Unidad #{datos.id_vehiculo} asignada al cliente #{datos.id_usuario}"
+        + (f" (permisos del titular anterior #{id_anterior} revocados)" if id_anterior and id_anterior != datos.id_usuario else "")
     )
     return {
         "id_asignacion": res["lastrowid"],

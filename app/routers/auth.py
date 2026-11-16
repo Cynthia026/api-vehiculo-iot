@@ -1,6 +1,7 @@
 import secrets
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, status, Depends, Request
+from fastapi.encoders import jsonable_encoder
 from typing import Dict, Any, Optional
 from app.database import db_manager
 from app.schemas.administracion import LoginRequest, GuestSessionRequest
@@ -10,6 +11,10 @@ from app.security import (
     get_current_user,
     limpiar_sesiones_expiradas,
     registrar_auditoria,
+    verificar_bloqueo_login,
+    registrar_fallo_login,
+    limpiar_fallos_login,
+    revocar_token,
     TOKEN_TTL_SECONDS,
     GUEST_TTL_SECONDS
 )
@@ -72,6 +77,9 @@ def iniciar_sesion(credenciales: LoginRequest, request: Request):
     """Inicia sesión para Administrador o Usuario Comprador verificando credenciales en RDS."""
     limpiar_sesiones_expiradas()
     email = credenciales.email.strip().lower()
+    ip_cliente = request.client.host if request.client else "API"
+    clave_intentos = f"{email}|{ip_cliente}"
+    verificar_bloqueo_login(clave_intentos)   # 429 si superó el límite de intentos
 
     usuarios = db_manager.execute_query(
         """
@@ -86,6 +94,12 @@ def iniciar_sesion(credenciales: LoginRequest, request: Request):
     )
 
     if not usuarios or not verify_password(credenciales.password, usuarios[0]["password_hash"]):
+        registrar_fallo_login(clave_intentos)
+        registrar_auditoria(
+            usuarios[0]["id_usuario"] if usuarios else None, usuarios[0]["rol"] if usuarios else "DESCONOCIDO",
+            "LOGIN_FALLIDO", "usuarios", usuarios[0]["id_usuario"] if usuarios else None,
+            "Intento de inicio de sesión con credenciales incorrectas", ip_cliente
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Correo electrónico o contraseña incorrectos."
@@ -98,6 +112,7 @@ def iniciar_sesion(credenciales: LoginRequest, request: Request):
             detail="Esta cuenta se encuentra desactivada. Contacta al Administrador."
         )
 
+    limpiar_fallos_login(clave_intentos)
     jti = secrets.token_hex(12)
     token = create_access_token(
         {
@@ -111,7 +126,6 @@ def iniciar_sesion(credenciales: LoginRequest, request: Request):
     )
 
     unidades = _obtener_unidades_permitidas(user["id_usuario"], user["rol"])
-    ip_cliente = request.client.host if request.client else "API"
     registrar_auditoria(
         user["id_usuario"], user["rol"], "LOGIN", "usuarios", user["id_usuario"],
         f"Inicio de sesión exitoso ({user['email']})", ip_cliente
@@ -259,6 +273,9 @@ async def cerrar_sesion(user: Dict[str, Any] = Depends(get_current_user)):
     jti = user.get("jti")
     id_res = user.get("id_vehiculo_reservado")
 
+    # Invalida el token: aunque alguien lo haya copiado, ya no sirve
+    revocar_token(jti, user.get("exp"))
+
     if jti:
         db_manager.execute_write(
             "UPDATE sesiones_control SET activa = 0 WHERE token_jti = %s",
@@ -276,7 +293,7 @@ async def cerrar_sesion(user: Dict[str, Any] = Depends(get_current_user)):
                 id_stop = cmds[0]["id_comando"]
                 estado_stop = EstadoVehiculoUpdate(id_vehiculo=id_res, id_comando=id_stop, conectado=True)
                 actualizado = telemetria_service.actualizar_estado(estado_stop)
-                await ws_manager.broadcast_json({"tipo_evento": "movimiento_individual", "datos": actualizado})
+                await ws_manager.broadcast_json({"tipo_evento": "movimiento_individual", "vehiculo": id_res, "datos": jsonable_encoder(actualizado)})
         except Exception as e:
             print(f"[LOGOUT STOP WARN] {e}")
 

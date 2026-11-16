@@ -3,10 +3,63 @@ from fastapi.exceptions import ResponseValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import asyncio
+from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 from app.database import db_manager
 from app.routers import vehiculos, comandos, telemetria, demos, auth, administracion, mis_vehiculos
+
+async def vigilar_sesiones_invitado(intervalo_seg: int = 5):
+    """
+    Cierra las reservas de Invitado vencidas y DETIENE físicamente la unidad de exhibición,
+    aunque el visitante haya cerrado la página (corte automático por expiración).
+    """
+    from app.routers.demos import active_demo_tasks, _obtener_id_comando_detener
+    from app.services.telemetria_service import telemetria_service
+    from app.schemas.estado import EstadoVehiculoUpdate
+    from app.websocket.manager import ws_manager
+    from app.security import registrar_auditoria
+
+    while True:
+        try:
+            vencidas = await asyncio.to_thread(
+                db_manager.execute_query,
+                "SELECT id_sesion, id_vehiculo, nombre_operador FROM sesiones_control WHERE activa = 1 AND expira_en <= NOW()"
+            )
+            for ses in vencidas or []:
+                cerrada = await asyncio.to_thread(
+                    db_manager.execute_write,
+                    "UPDATE sesiones_control SET activa = 0 WHERE id_sesion = %s AND activa = 1",
+                    (ses["id_sesion"],)
+                )
+                if not cerrada.get("rowcount"):
+                    continue  # otro proceso ya la cerró
+                id_v = int(ses["id_vehiculo"])
+                tarea = active_demo_tasks.pop(id_v, None)
+                if tarea:
+                    tarea.cancel()
+                id_stop = await asyncio.to_thread(_obtener_id_comando_detener, id_v)
+                estado = await asyncio.to_thread(
+                    telemetria_service.actualizar_estado,
+                    EstadoVehiculoUpdate(id_vehiculo=id_v, id_comando=id_stop, conectado=True)
+                )
+                await ws_manager.broadcast_json({
+                    "tipo_evento": "movimiento_individual",
+                    "vehiculo": id_v,
+                    "datos": jsonable_encoder(estado or {"id_vehiculo": id_v, "id_comando": id_stop, "comando": "DETENER"})
+                })
+                await ws_manager.broadcast_json({"tipo_evento": "sesion_invitado_expirada", "vehiculo": id_v})
+                await asyncio.to_thread(
+                    registrar_auditoria, None, "SISTEMA", "EXPIRACION_INVITADO", "sesiones_control", id_v,
+                    f"Prueba de '{ses.get('nombre_operador') or 'Invitado'}' vencida: unidad #{id_v} detenida y liberada"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[VIGILANTE INVITADO WARN] {e}")
+        await asyncio.sleep(intervalo_seg)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -20,7 +73,9 @@ async def lifespan(app: FastAPI):
         print(" [ADVERTENCIA] No se pudo conectar a RDS.")
         print(" -> Revisa tu archivo .env y el Security Group (puerto 3306).")
     print("=======================================================\n")
+    vigilante = asyncio.create_task(vigilar_sesiones_invitado())
     yield
+    vigilante.cancel()
     print("\n--- Servidor detenido. ---")
 
 app = FastAPI(

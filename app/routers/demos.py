@@ -10,7 +10,12 @@ from app.security import (
     get_current_user_optional,
     decode_access_token,
     verificar_acceso_vehiculo,
-    registrar_auditoria
+    registrar_auditoria,
+    get_current_user,
+    verificar_lectura_demo,
+    verificar_edicion_demo,
+    obtener_demo,
+    COMANDOS_INVITADO
 )
 from app.database import db_manager
 
@@ -19,6 +24,55 @@ router = APIRouter(prefix="/api/demos", tags=["Secuencias DEMO"])
 # --- DICCIONARIO GLOBAL DE TAREAS EN CURSO ---
 # Guarda las tareas activas para evitar simultaneidad y permitir cancelación
 active_demo_tasks: Dict[int, asyncio.Task] = {}
+
+
+_pk_movimientos: Optional[str] = None
+
+
+def _columna_pk_movimientos() -> str:
+    """Nombre real de la llave primaria de demo_movimientos (se consulta una vez en INFORMATION_SCHEMA)."""
+    global _pk_movimientos
+    if _pk_movimientos:
+        return _pk_movimientos
+    filas = db_manager.execute_query(
+        """
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'demo_movimientos' AND CONSTRAINT_NAME = 'PRIMARY'
+        LIMIT 1
+        """
+    )
+    nombre = (filas[0].get("COLUMN_NAME") if filas else None) or "id_demo_movimiento"
+    if not nombre.replace("_", "").isalnum():
+        nombre = "id_demo_movimiento"
+    _pk_movimientos = nombre
+    return nombre
+
+
+def _demo_de_movimiento(id_demo_movimiento: int) -> int:
+    pk = _columna_pk_movimientos()
+    filas = db_manager.execute_query(f"SELECT id_demo FROM demo_movimientos WHERE {pk} = %s LIMIT 1", (id_demo_movimiento,))
+    if not filas:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Paso {id_demo_movimiento} no encontrado")
+    return int(filas[0]["id_demo"])
+
+
+def _validar_comando_paso(id_comando: int, id_vehiculo: int) -> None:
+    """El paso sólo puede usar un comando habilitado de la misma unidad (compatible con su hardware)."""
+    filas = db_manager.execute_query(
+        "SELECT activo FROM comandos WHERE id_comando = %s AND id_vehiculo = %s LIMIT 1",
+        (id_comando, id_vehiculo)
+    )
+    if not filas:
+        raise HTTPException(status_code=422, detail="El comando no pertenece a la unidad de esta demo.")
+    if not filas[0].get("activo"):
+        raise HTTPException(status_code=422, detail="El comando no está habilitado para esta unidad.")
+
+
+def _validar_tiempos(duracion_ms: int, pausa_ms: int) -> None:
+    if duracion_ms < 100 or duracion_ms > 10000:
+        raise HTTPException(status_code=422, detail="La duración del paso debe estar entre 100 ms y 10,000 ms por seguridad física.")
+    if pausa_ms < 0 or pausa_ms > 5000:
+        raise HTTPException(status_code=422, detail="La pausa entre pasos debe estar entre 0 ms y 5,000 ms.")
 
 
 def _obtener_id_comando_detener(id_vehiculo: int) -> int:
@@ -105,12 +159,12 @@ def listar_demos_vehiculo(
 @router.post("/", status_code=status.HTTP_201_CREATED)
 def crear_demo(
     demo: DemoCreate,
-    user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+    user: Dict[str, Any] = Depends(get_current_user)
 ):
-    if user and user.get("rol") == "INVITADO":
+    if user.get("rol") == "INVITADO":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="El perfil Invitado no puede crear nuevas demos.")
 
-    verificar_acceso_vehiculo(demo.id_vehiculo, user, modo="control" if (user and user.get("rol") == "USUARIO") else "lectura")
+    verificar_acceso_vehiculo(demo.id_vehiculo, user, modo="control" if user.get("rol") == "USUARIO" else "lectura")
     creada = demo_service.crear_demo(demo)
 
     # Etiquetar si fue creada por ADMIN (EMPRESA) o por USUARIO comprador (PRIVADA)
@@ -139,9 +193,10 @@ def actualizar_demo(
     demo: DemoUpdate,
     user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
-    if user and user.get("rol") == "INVITADO":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="El perfil Invitado no puede editar demos.")
+    verificar_edicion_demo(id_demo, user)
     demo_service.actualizar_demo(id_demo, demo)
+    registrar_auditoria(user.get("id_usuario"), user.get("rol"), "EDICION_DEMO", "demos", id_demo,
+                        f"Demo #{id_demo} actualizada ('{demo.nombre}', activo={demo.activo})")
     return {"mensaje": "Demo actualizada"}
 
 
@@ -150,9 +205,10 @@ def eliminar_demo(
     id_demo: int,
     user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
-    if user and user.get("rol") == "INVITADO":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="El perfil Invitado no puede eliminar demos.")
+    demo_info = verificar_edicion_demo(id_demo, user)
     demo_service.eliminar_demo(id_demo)
+    registrar_auditoria(user.get("id_usuario"), user.get("rol"), "ELIMINACION_DEMO", "demos", id_demo,
+                        f"Demo #{id_demo} '{demo_info.get('nombre')}' eliminada")
     return None
 
 
@@ -164,17 +220,22 @@ def agregar_movimiento_demo(
 ):
     if mov.id_demo != id_demo:
         raise HTTPException(status_code=400, detail="El ID no coincide")
-    if mov.duracion_ms < 100 or mov.duracion_ms > 10000:
-        raise HTTPException(status_code=422, detail="La duración del paso debe estar entre 100 ms y 10,000 ms por seguridad física.")
-    if mov.pausa_ms < 0 or mov.pausa_ms > 5000:
-        raise HTTPException(status_code=422, detail="La pausa entre pasos debe estar entre 0 ms y 5,000 ms.")
+    _validar_tiempos(mov.duracion_ms, mov.pausa_ms)
+    demo_info = verificar_edicion_demo(id_demo, user)
+    _validar_comando_paso(mov.id_comando, demo_info["id_vehiculo"])
 
     demo_service.agregar_movimiento(mov)
+    registrar_auditoria(user.get("id_usuario"), user.get("rol"), "PASO_DEMO_AGREGADO", "demo_movimientos", id_demo,
+                        f"Paso #{mov.orden} (comando {mov.id_comando}, {mov.duracion_ms} ms) agregado a demo #{id_demo}")
     return {"mensaje": "Movimiento agregado"}
 
 
 @router.get("/{id_demo}/movimientos", response_model=List[MovimientoDemoResponse])
-def obtener_movimientos_demo(id_demo: int):
+def obtener_movimientos_demo(
+    id_demo: int,
+    user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
+):
+    verificar_lectura_demo(id_demo, user)
     return demo_service.obtener_movimientos(id_demo)
 
 
@@ -184,9 +245,13 @@ def actualizar_movimiento_demo(
     mov: MovimientoDemoUpdate,
     user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
-    if mov.duracion_ms < 100 or mov.duracion_ms > 10000:
-        raise HTTPException(status_code=422, detail="La duración del paso debe estar entre 100 ms y 10,000 ms.")
+    _validar_tiempos(mov.duracion_ms, mov.pausa_ms)
+    id_demo = _demo_de_movimiento(id_demo_movimiento)
+    demo_info = verificar_edicion_demo(id_demo, user)
+    _validar_comando_paso(mov.id_comando, demo_info["id_vehiculo"])
     demo_service.actualizar_movimiento(id_demo_movimiento, mov)
+    registrar_auditoria(user.get("id_usuario"), user.get("rol"), "PASO_DEMO_EDITADO", "demo_movimientos", id_demo,
+                        f"Paso {id_demo_movimiento} de demo #{id_demo} actualizado")
     return {"mensaje": "Movimiento actualizado"}
 
 
@@ -195,7 +260,11 @@ def eliminar_movimiento_demo(
     id_demo_movimiento: int,
     user: Optional[Dict[str, Any]] = Depends(get_current_user_optional)
 ):
+    id_demo = _demo_de_movimiento(id_demo_movimiento)
+    verificar_edicion_demo(id_demo, user)
     demo_service.eliminar_movimiento(id_demo_movimiento)
+    registrar_auditoria(user.get("id_usuario"), user.get("rol"), "PASO_DEMO_ELIMINADO", "demo_movimientos", id_demo,
+                        f"Paso {id_demo_movimiento} eliminado de demo #{id_demo}")
     return None
 
 
@@ -255,6 +324,18 @@ async def iniciar_ejecucion_demo(
 ):
     """Inicia la demo validando autorización por recurso y bloquea ejecuciones simultáneas."""
     verificar_acceso_vehiculo(id_vehiculo, user, modo="control")
+    demo_info = verificar_lectura_demo(id_demo, user)
+    if int(demo_info["id_vehiculo"]) != int(id_vehiculo):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta demo pertenece a otra unidad.")
+    if user.get("rol") == "INVITADO":
+        # El Invitado sólo ejecuta demos cuyos pasos usen comandos permitidos para él
+        pasos = demo_service.obtener_movimientos(id_demo)
+        nombres = {int(c["id_comando"]): str(c["nombre"]).strip().upper() for c in db_manager.execute_query(
+            "SELECT id_comando, nombre FROM comandos WHERE id_vehiculo = %s", (id_vehiculo,))}
+        prohibidos = {nombres.get(int(p.get("id_comando") or 0), "DESCONOCIDO") for p in pasos} - COMANDOS_INVITADO
+        if prohibidos:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                                detail=f"Esta demo usa comandos no permitidos para Invitado: {', '.join(sorted(prohibidos))}.")
 
     if id_vehiculo in active_demo_tasks:
         raise HTTPException(

@@ -1,3 +1,6 @@
+import os
+import secrets
+import hashlib
 import pymysql
 from pymysql.cursors import DictCursor
 from typing import List, Optional, Any
@@ -193,6 +196,17 @@ class DatabaseManager:
                 self._add_column_if_missing(cur, "demos", "tipo_demo", "VARCHAR(20) NOT NULL DEFAULT 'EMPRESA'")
                 self._add_column_if_missing(cur, "demos", "duracion_max_seg", "INT NOT NULL DEFAULT 60")
 
+                # V002: tokens invalidados por logout (sesiones cerradas antes de expirar)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tokens_revocados (
+                        jti VARCHAR(80) PRIMARY KEY,
+                        expira_en DATETIME NOT NULL,
+                        fecha_revocacion TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_tokens_revocados_expira (expira_en)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """)
+                cur.execute("DELETE FROM tokens_revocados WHERE expira_en < NOW() - INTERVAL 1 DAY")
+
                 # Datos semilla idempotentes
                 cur.execute("""
                     INSERT INTO roles (id_rol, codigo, nombre, descripcion) VALUES
@@ -207,27 +221,57 @@ class DatabaseManager:
                         (2, 'ROV-IOT-V1', 'Rover Explorador IoT', 'Vehículo compacto 4WD con tracción diferencial y telemetría.', 'ESP8266', 0, 1, 1)
                     ON DUPLICATE KEY UPDATE nombre = VALUES(nombre);
                 """)
-                cur.execute("""
-                    INSERT INTO usuarios (id_usuario, id_rol, nombre, email, password_hash, activo) VALUES
-                        (1, 1, 'Administrador General', 'admin@vehiculoiot.com', CONCAT('sha256$iot2026$', LOWER(SHA2('iot2026:Admin123*', 256))), 1),
-                        (2, 2, 'Cynthia Martínez García', 'cynthia@cliente.com', CONCAT('sha256$iot2026$', LOWER(SHA2('iot2026:Cliente123*', 256))), 1),
-                        (3, 2, 'Carlos Mendoza (Comprador B)', 'carlos@cliente.com', CONCAT('sha256$iot2026$', LOWER(SHA2('iot2026:Cliente123*', 256))), 1),
-                        (4, 3, 'Invitado Demo', 'invitado@vehiculoiot.com', CONCAT('sha256$iot2026$', LOWER(SHA2('iot2026:Invitado123*', 256))), 1)
-                    ON DUPLICATE KEY UPDATE nombre = VALUES(nombre), password_hash = VALUES(password_hash);
-                """)
+                # Cuentas de demostración. Las contraseñas NUNCA van en el código:
+                # se leen de .env (SEED_*_PASSWORD). Si una variable no existe, la cuenta se crea
+                # (sólo si no existía) con una contraseña aleatoria desconocida, y NUNCA se
+                # sobrescribe una contraseña existente salvo que definas la variable (rotación).
+                cuentas = [
+                    (1, 1, "Administrador General", "admin@vehiculoiot.com", "SEED_ADMIN_PASSWORD"),
+                    (2, 2, "Cynthia Martínez García", "cynthia@cliente.com", "SEED_CYNTHIA_PASSWORD"),
+                    (3, 2, "Carlos Mendoza (Comprador B)", "carlos@cliente.com", "SEED_CARLOS_PASSWORD"),
+                    (4, 3, "Invitado Demo", "invitado@vehiculoiot.com", "SEED_INVITADO_PASSWORD"),
+                ]
+                for id_u, id_rol, nombre, email, var in cuentas:
+                    clave = os.getenv(var, "").strip()
+                    sal = secrets.token_hex(8)
+                    if clave:
+                        hash_pwd = f"sha256${sal}${hashlib.sha256(f'{sal}:{clave}'.encode('utf-8')).hexdigest()}"
+                        cur.execute(
+                            """
+                            INSERT INTO usuarios (id_usuario, id_rol, nombre, email, password_hash, activo)
+                            VALUES (%s, %s, %s, %s, %s, 1)
+                            ON DUPLICATE KEY UPDATE password_hash = VALUES(password_hash)
+                            """,
+                            (id_u, id_rol, nombre, email, hash_pwd)
+                        )
+                    else:
+                        aleatoria = secrets.token_urlsafe(24)
+                        hash_pwd = f"sha256${sal}${hashlib.sha256(f'{sal}:{aleatoria}'.encode('utf-8')).hexdigest()}"
+                        cur.execute(
+                            "INSERT IGNORE INTO usuarios (id_usuario, id_rol, nombre, email, password_hash, activo) VALUES (%s, %s, %s, %s, %s, 1)",
+                            (id_u, id_rol, nombre, email, hash_pwd)
+                        )
+
+                # Asignación inicial de la Unidad 1 SÓLO la primera vez (tabla vacía).
+                # Antes se ejecutaba en cada arranque y deshacía las liberaciones/reasignaciones del Admin.
+                cur.execute("SELECT COUNT(*) AS total FROM asignaciones_vehiculo")
+                primera_vez = (cur.fetchone() or {}).get("total", 0) == 0
                 cur.execute("""
                     UPDATE vehiculos
                     SET id_modelo = COALESCE(id_modelo, 1),
-                        numero_serie = COALESCE(numero_serie, 'SN-EXC-0001'),
-                        estado_comercial = CASE WHEN estado_comercial = 'DISPONIBLE' THEN 'VENDIDO' ELSE estado_comercial END
+                        numero_serie = COALESCE(numero_serie, 'SN-EXC-0001')
                     WHERE id_vehiculo = 1;
                 """)
-                cur.execute("""
-                    INSERT INTO asignaciones_vehiculo (id_vehiculo, id_usuario, notas, activo)
-                    SELECT 1, 2, 'Asignación titular de Unidad 1 a Cynthia Martínez García', 1
-                    WHERE EXISTS (SELECT 1 FROM vehiculos WHERE id_vehiculo = 1)
-                      AND NOT EXISTS (SELECT 1 FROM asignaciones_vehiculo WHERE id_vehiculo = 1 AND activo = 1);
-                """)
+                if primera_vez:
+                    cur.execute("""
+                        UPDATE vehiculos SET estado_comercial = 'VENDIDO'
+                        WHERE id_vehiculo = 1 AND estado_comercial = 'DISPONIBLE';
+                    """)
+                    cur.execute("""
+                        INSERT INTO asignaciones_vehiculo (id_vehiculo, id_usuario, notas, activo)
+                        SELECT 1, 2, 'Asignación titular de Unidad 1 a Cynthia Martínez García', 1
+                        WHERE EXISTS (SELECT 1 FROM vehiculos WHERE id_vehiculo = 1);
+                    """)
             conn.close()
             return True
         except Exception as err:

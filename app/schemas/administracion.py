@@ -57,3 +57,22 @@ class AsignacionCreate(BaseModel):
 class SoporteToggleRequest(BaseModel):
     autorizado: bool
     minutos: int = Field(30, ge=5, le=240)
+
+
+ESTADOS_COMERCIALES = ("DISPONIBLE", "VENDIDO", "EXHIBICION", "MANTENIMIENTO", "INACTIVO")
+
+
+class ModeloCatalogoUpdate(BaseModel):
+    nombre: str = Field(..., min_length=2, max_length=80)
+    descripcion: Optional[str] = Field(None, max_length=255)
+    microcontrolador_default: str = Field("ESP8266", max_length=50)
+    tiene_brazo: bool = True
+    tiene_motores_giro: bool = True
+    activo: bool = True
+
+
+class ClienteUpdate(BaseModel):
+    nombre: str = Field(..., min_length=2, max_length=100)
+    email: str = Field(..., max_length=120)
+    activo: bool = True
+    password: Optional[str] = Field(None, min_length=8, max_length=100)
